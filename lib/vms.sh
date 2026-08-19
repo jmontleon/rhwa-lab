@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# vms.sh - define libvirt domains for the OpenShift nodes and run sushy-tools
+# (emulated Redfish BMC) in front of them.
+
+# Create the 6 domains (empty disks, UEFI, pinned MACs), NOT started yet.
+vms_define() {
+  compute_nodes
+  log "Defining ${#NODE_NAME[@]} libvirt domains"
+  local i name ram_mb
+  for i in "${!NODE_NAME[@]}"; do
+    name="${NODE_NAME[$i]}"
+    ram_mb=$(( NODE_RAM[i] * 1024 ))
+    ssh_host "sudo bash -s" <<EOS
+set -e
+if virsh dominfo '${name}' >/dev/null 2>&1; then
+  echo "domain ${name} exists, skipping"
+else
+  qemu-img create -f qcow2 /var/lib/libvirt/images/${name}.qcow2 ${NODE_DISK_GB}G >/dev/null
+  # Generate domain XML and define WITHOUT starting (--print-xml + virsh define).
+  virt-install \
+    --name '${name}' \
+    --memory ${ram_mb} \
+    --vcpus ${NODE_VCPU[$i]} \
+    --cpu host-passthrough \
+    --os-variant rhel9.4 \
+    --disk path=/var/lib/libvirt/images/${name}.qcow2,bus=virtio \
+    --disk path=/var/lib/libvirt/images/${CLUSTER_NAME}-agent.iso,device=cdrom \
+    --network network=${LIBVIRT_NET},mac='${NODE_MAC[$i]}',model=virtio \
+    --boot uefi,hd,cdrom \
+    --graphics none --noautoconsole --import --print-xml 1 > /tmp/${name}.xml
+  virsh define /tmp/${name}.xml >/dev/null
+fi
+EOS
+    # ITERATE: the cdrom target dev name (sda vs hda) and interface name
+    # (enp1s0) inside RHCOS depend on machine type; verify on first boot.
+  done
+  ok "Domains defined"
+
+  # Record UUIDs (sushy uses the domain UUID as the Redfish System id).
+  for i in "${!NODE_NAME[@]}"; do
+    local uuid
+    uuid="$(ssh_host "virsh domuuid '${NODE_NAME[$i]}'" 2>/dev/null | tr -d '\r' | head -1)"
+    state_set "uuid_${NODE_NAME[$i]}" "$uuid"
+  done
+}
+
+# Boot all domains from the agent ISO (called after the ISO exists on host).
+vms_boot() {
+  compute_nodes
+  log "Attaching agent ISO and powering on all domains"
+  local i name
+  for i in "${!NODE_NAME[@]}"; do
+    name="${NODE_NAME[$i]}"
+    ssh_host "sudo virsh start '${name}'" >/dev/null 2>&1 || warn "start ${name} failed"
+  done
+  ok "All domains powered on (installing from agent ISO)"
+}
+
+# Run sushy-tools as a podman container serving Redfish over TLS on SUSHY_PORT.
+vms_sushy() {
+  log "Starting sushy-tools (emulated Redfish BMC)"
+  ssh_host 'sudo bash -s' <<EOS
+set -euo pipefail
+sudo mkdir -p /etc/rhwa-sushy
+# Self-signed cert for the host bridge IP; fence_redfish uses --ssl-insecure.
+if [[ ! -f /etc/rhwa-sushy/cert.pem ]]; then
+  sudo openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout /etc/rhwa-sushy/key.pem -out /etc/rhwa-sushy/cert.pem \
+    -days 3650 -subj "/CN=${NET_GATEWAY}" >/dev/null 2>&1
+fi
+# Basic-auth file so fence_redfish credentials are honored.
+sudo htpasswd -bc /etc/rhwa-sushy/htpasswd '${SUSHY_USER}' '${SUSHY_PASS}' >/dev/null 2>&1
+sudo tee /etc/rhwa-sushy/sushy-emulator.conf >/dev/null <<CONF
+SUSHY_EMULATOR_LISTEN_IP = u'0.0.0.0'
+SUSHY_EMULATOR_LISTEN_PORT = ${SUSHY_PORT}
+SUSHY_EMULATOR_LIBVIRT_URI = u'qemu:///system'
+SUSHY_EMULATOR_IGNORE_BOOT_DEVICE = True
+SUSHY_EMULATOR_SSL_CERT = u'/etc/sushy/cert.pem'
+SUSHY_EMULATOR_SSL_KEY = u'/etc/sushy/key.pem'
+SUSHY_EMULATOR_AUTH_FILE = u'/etc/sushy/htpasswd'
+CONF
+sudo podman rm -f sushy >/dev/null 2>&1 || true
+sudo podman run -d --name sushy --restart always \
+  --net host --privileged \
+  -v /var/run/libvirt:/var/run/libvirt \
+  -v /etc/rhwa-sushy:/etc/sushy:ro \
+  quay.io/metal3-io/sushy-tools:latest \
+  sushy-emulator --config /etc/sushy/sushy-emulator.conf >/dev/null
+echo "sushy started"
+EOS
+  # Verify it answers
+  retry 12 5 -- ssh_host "curl -sk -u '${SUSHY_USER}:${SUSHY_PASS}' https://${NET_GATEWAY}:${SUSHY_PORT}/redfish/v1/Systems >/dev/null" \
+    || warn "sushy-tools did not answer on ${NET_GATEWAY}:${SUSHY_PORT}"
+  ok "sushy-tools serving Redfish at https://${NET_GATEWAY}:${SUSHY_PORT}"
+}
+
+vms_teardown() {
+  compute_nodes
+  ssh_host 'sudo podman rm -f sushy >/dev/null 2>&1 || true' || true
+  local i name
+  for i in "${!NODE_NAME[@]}"; do
+    name="${NODE_NAME[$i]}"
+    ssh_host "sudo bash -c '
+      virsh destroy \"${name}\" 2>/dev/null || true
+      virsh undefine \"${name}\" --nvram --remove-all-storage 2>/dev/null || true'" || true
+  done
+}

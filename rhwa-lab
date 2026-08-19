@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# rhwa-lab - stand up / tear down a disposable "bare metal" OpenShift cluster
+# on a nested-virt AWS m8i instance and test RHWA fence_redfish remediation.
+#
+# Usage:
+#   ./rhwa-lab create     Provision everything end-to-end
+#   ./rhwa-lab test       Trigger + verify a fence_redfish remediation
+#   ./rhwa-lab status     Show endpoints, credentials, uptime
+#   ./rhwa-lab destroy    Tear everything down (incl. Route53 records)
+#   ./rhwa-lab help       Show this help
+#
+# All inputs come from environment variables (see README.md). No config file.
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/common.sh
+source "${SELF_DIR}/lib/common.sh"
+source "${SELF_DIR}/lib/state.sh"
+source "${SELF_DIR}/lib/aws.sh"
+source "${SELF_DIR}/lib/host.sh"
+source "${SELF_DIR}/lib/vms.sh"
+source "${SELF_DIR}/lib/openshift.sh"
+source "${SELF_DIR}/lib/rhwa.sh"
+source "${SELF_DIR}/lib/testfence.sh"
+
+usage() { sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+check_inputs() {
+  require_cmds aws jq curl ssh scp tar openssl
+  require_env AWS_REGION ROUTE53_ZONE_ID PULL_SECRET
+  if [[ -z "${AWS_PROFILE:-}" ]]; then
+    require_env AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+  fi
+}
+
+report() {
+  local pw; pw="$(cat "${CLUSTER_DIR}/kubeadmin-password" 2>/dev/null || echo '<unavailable>')"
+  cat >&2 <<EOF
+
+$(printf '\033[1;32m')========================================================================
+ RHWA lab '${CLUSTER_NAME}' is READY
+========================================================================$(printf '\033[0m')
+ Console : $(console_url)
+ API     : https://$(api_fqdn):6443
+ kubeadmin password : ${pw}
+ kubeconfig         : ${KUBECONFIG_LOCAL}
+
+ Use the cluster:
+   export KUBECONFIG=${KUBECONFIG_LOCAL}
+   ${BIN_DIR}/oc get nodes
+
+ Test fencing:   ./rhwa-lab test
+ Tear it down:   ./rhwa-lab destroy
+
+ SECURITY: API/console are exposed to the internet (0.0.0.0/0) on a public
+ redhat.com name. Rotate/remove the kubeadmin user when done testing.
+EOF
+}
+
+cmd_create() {
+  check_inputs
+  state_init
+  log "Creating RHWA lab '${CLUSTER_NAME}' (${INSTANCE_TYPE}, OCP ${OCP_VERSION})"
+  aws_preflight
+  aws_import_keypair
+  aws_security_group
+  aws_launch_instance
+  aws_dns_upsert
+  host_provision
+  os_host_tools
+  os_render_configs
+  os_build_image
+  vms_define
+  vms_sushy
+  vms_boot
+  os_wait_install
+  os_local_oc
+  os_wait_cluster_ready
+  rhwa_setup
+  ok "Create complete"
+  report
+}
+
+cmd_test() { check_inputs; test_fence; }
+
+cmd_destroy() {
+  require_cmds aws
+  state_init
+  log "Destroying RHWA lab '${CLUSTER_NAME}'"
+  aws_teardown          # terminating the instance removes VMs/sushy/haproxy with it
+  rm -rf "$CLUSTER_DIR"
+  state_wipe
+  ok "Destroy complete (local state removed)"
+}
+
+cmd_status() {
+  state_init
+  local iid eip; iid="$(state_get instance_id)"; eip="$(state_get eip)"
+  echo "Cluster        : ${CLUSTER_NAME}"
+  echo "Instance       : ${iid:-<none>}"
+  if [[ -n "$iid" ]]; then
+    local st launch
+    st="$(aws ec2 describe-instances --instance-ids "$iid" \
+         --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo unknown)"
+    launch="$(aws ec2 describe-instances --instance-ids "$iid" \
+         --query 'Reservations[0].Instances[0].LaunchTime' --output text 2>/dev/null || echo '')"
+    echo "Instance state : ${st}  (launched ${launch})  [billing runs while 'running']"
+  fi
+  echo "Elastic IP     : ${eip:-<none>}"
+  echo "Console        : $(console_url)"
+  echo "API            : https://$(api_fqdn):6443"
+  if [[ "$(state_get cluster_installed)" == "yes" ]]; then
+    if curl -fskm 5 "https://$(api_fqdn):6443/healthz" >/dev/null 2>&1; then
+      echo "API reachable  : yes"
+    else
+      echo "API reachable  : no (VIP/haproxy/cluster may be down)"
+    fi
+    echo "kubeconfig     : ${KUBECONFIG_LOCAL}"
+  fi
+}
+
+main() {
+  local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    create)  cmd_create  "$@" ;;
+    test)    cmd_test    "$@" ;;
+    destroy) cmd_destroy "$@" ;;
+    status)  cmd_status  "$@" ;;
+    help|-h|--help) usage ;;
+    *) usage; die "Unknown command: ${cmd}" ;;
+  esac
+}
+
+main "$@"
