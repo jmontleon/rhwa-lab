@@ -58,8 +58,9 @@ spec:
   sourceNamespace: openshift-marketplace
   installPlanApproval: Automatic
 EOF
-  _wait_csv "node-healthcheck-operator"
-  _wait_csv "fence-agents-remediation"
+  # Non-fatal: warn and continue so `test` can surface any real problem.
+  _wait_csv "node-healthcheck-operator" || true
+  _wait_csv "fence-agents-remediation" || true
 }
 
 # Build the per-node "--systems-uri" nodeparameters block (Node name -> URI).

@@ -80,7 +80,7 @@ Set them and re-run. See README.md for the full contract."
 require_cmds() {
   local missing=() c
   for c in "$@"; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
-  (( ${#missing[@]} )) && die "Missing required command(s): ${missing[*]}"
+  if (( ${#missing[@]} )); then die "Missing required command(s): ${missing[*]}"; fi
 }
 
 # retry <n> <sleep> -- <cmd...>
