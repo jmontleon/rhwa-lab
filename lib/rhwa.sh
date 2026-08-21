@@ -30,9 +30,11 @@ kind: OperatorGroup
 metadata:
   name: rhwa-operatorgroup
   namespace: ${RHWA_NAMESPACE}
-spec:
-  targetNamespaces:
-  - ${RHWA_NAMESPACE}
+# Empty spec = AllNamespaces install mode. NHC and FAR are AllNamespaces-only
+# operators; a targetNamespaces (OwnNamespace/SingleNamespace) OperatorGroup
+# makes OLM reject their CSVs with "UnsupportedOperatorGroup / OwnNamespace
+# InstallModeType not supported".
+spec: {}
 ---
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription

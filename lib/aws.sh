@@ -1,10 +1,39 @@
 #!/usr/bin/env bash
 # aws.sh - EC2 instance, keypair, security group, Elastic IP, Route53 records.
 
+# Resolve ROUTE53_ZONE_ID to a real hosted-zone id. Accepts:
+#   - an existing zone id (Z...)         -> used as-is
+#   - a domain name (migration.redhat.com) -> looked up
+#   - unset                              -> resolved from BASE_DOMAIN
+# Falls back to the closest parent zone (e.g. redhat.com) if needed.
+resolve_r53_zone() {
+  if [[ "${ROUTE53_ZONE_ID:-}" =~ ^Z[A-Z0-9]+$ ]]; then
+    state_set r53_zone "$ROUTE53_ZONE_ID"; return 0
+  fi
+  local domain try id
+  domain="${ROUTE53_ZONE_ID:-$BASE_DOMAIN}"; domain="${domain%.}"
+  try="$domain"
+  while [[ "$try" == *.* ]]; do
+    id="$(aws route53 list-hosted-zones-by-name --dns-name "${try}." \
+          --query "HostedZones[?Name=='${try}.'].Id|[0]" --output text 2>/dev/null)"
+    if [[ -n "$id" && "$id" != "None" ]]; then
+      ROUTE53_ZONE_ID="${id#/hostedzone/}"
+      state_set r53_zone "$ROUTE53_ZONE_ID"
+      log "Resolved Route53 zone for ${domain}: ${ROUTE53_ZONE_ID} (${try}.)"
+      return 0
+    fi
+    try="${try#*.}"   # drop leftmost label, try the parent domain
+  done
+  die "No Route53 hosted zone found for ${domain} (or any parent domain).
+Set ROUTE53_ZONE_ID to a zone id (Z...) or a domain you own in Route53."
+}
+
 aws_preflight() {
   log "AWS preflight checks"
   aws sts get-caller-identity >/dev/null 2>&1 \
     || die "AWS credentials invalid or not set (check AWS_ACCESS_KEY_ID / AWS_PROFILE)."
+
+  resolve_r53_zone
 
   # Instance type available in this region?
   local offered
@@ -76,12 +105,26 @@ aws_launch_instance() {
     log "Instance already recorded ($(state_get instance_id)); skipping launch"
     return 0
   fi
-  local ami
-  ami="$(aws ssm get-parameters \
-      --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
-      --query 'Parameters[0].Value' --output text)"
-  [[ -z "$ami" || "$ami" == "None" ]] && die "Could not resolve AL2023 AMI via SSM."
-  log "Launching ${INSTANCE_TYPE} from ${ami} (nested virt enabled)"
+  # Fedora Cloud Base (owner = Fedora Project, 125523088429) has the full
+  # virtualization stack (libvirt/qemu-kvm/virt-install/podman); default user
+  # is 'fedora' (HOST_SSH_USER). AL2023 does NOT ship these packages.
+  # Override the image with HOST_AMI (also set HOST_SSH_USER to match).
+  local ami root_dev
+  ami="${HOST_AMI:-}"
+  if [[ -z "$ami" ]]; then
+    ami="$(aws ec2 describe-images --owners 125523088429 \
+        --filters "Name=name,Values=Fedora-Cloud-Base-AmazonEC2*-${FEDORA_RELEASE}-*" \
+                  "Name=architecture,Values=x86_64" \
+                  "Name=state,Values=available" \
+        --query 'sort_by(Images, &CreationDate)[-1].ImageId' --output text 2>/dev/null)"
+  fi
+  [[ -z "$ami" || "$ami" == "None" ]] \
+    && die "Could not resolve Fedora ${FEDORA_RELEASE} Cloud AMI in ${AWS_REGION}. Set HOST_AMI (+ HOST_SSH_USER) to a virtualization-capable image."
+  # Root device name varies by AMI (CentOS uses /dev/sda1); resize that volume.
+  root_dev="$(aws ec2 describe-images --image-ids "$ami" \
+      --query 'Images[0].RootDeviceName' --output text 2>/dev/null)"
+  [[ -z "$root_dev" || "$root_dev" == "None" ]] && root_dev="/dev/sda1"
+  log "Launching ${INSTANCE_TYPE} from ${ami} (root ${root_dev}, nested virt enabled)"
 
   local iid
   iid="$(aws ec2 run-instances \
@@ -90,7 +133,7 @@ aws_launch_instance() {
       --key-name "$KEYPAIR_NAME" \
       --security-group-ids "$(state_get sg_id)" \
       --cpu-options "NestedVirtualization=enabled" \
-      --block-device-mappings "DeviceName=/dev/xvda,Ebs={VolumeSize=${EC2_VOLUME_SIZE_GB},VolumeType=gp3,DeleteOnTermination=true}" \
+      --block-device-mappings "DeviceName=${root_dev},Ebs={VolumeSize=${EC2_VOLUME_SIZE_GB},VolumeType=gp3,DeleteOnTermination=true}" \
       --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${CLUSTER_NAME}},{Key=rhwa-lab,Value=${CLUSTER_NAME}}]" \
       --query 'Instances[0].InstanceId' --output text)"
   [[ -z "$iid" || "$iid" == "None" ]] && die "run-instances failed."
@@ -117,7 +160,11 @@ aws_launch_instance() {
 
 # Route53 UPSERT/DELETE for api + *.apps -> Elastic IP
 _r53_change() {   # <action>
-  local action="$1" eip; eip="$(state_get eip)"
+  local action="$1" eip zone
+  eip="$(state_get eip)"
+  # Prefer the resolved zone id persisted at preflight (so destroy works even
+  # when ROUTE53_ZONE_ID in the env is a domain name, or unset).
+  zone="$(state_get r53_zone)"; [[ -n "$zone" ]] || zone="$ROUTE53_ZONE_ID"
   local batch
   batch="$(cat <<JSON
 {"Changes":[
@@ -126,7 +173,7 @@ _r53_change() {   # <action>
 ]}
 JSON
 )"
-  aws route53 change-resource-record-sets --hosted-zone-id "$ROUTE53_ZONE_ID" \
+  aws route53 change-resource-record-sets --hosted-zone-id "$zone" \
     --change-batch "$batch" --query 'ChangeInfo.Id' --output text
 }
 

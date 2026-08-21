@@ -3,10 +3,11 @@
 
 host_install_packages() {
   log "Installing virtualization stack on host"
+  # Fedora: all of these are in the default repos (unlike AL2023).
   ssh_host 'sudo bash -s' <<'EOS'
 set -euo pipefail
 sudo dnf -y install qemu-kvm libvirt virt-install libvirt-client \
-     podman haproxy jq httpd-tools openssl bind-utils >/dev/null
+     podman haproxy jq httpd-tools openssl bind-utils nmstate >/dev/null
 sudo systemctl enable --now libvirtd
 # Nested KVM sanity: /dev/kvm must exist (L0 passes VT-x when NestedVirtualization=enabled)
 if [[ ! -e /dev/kvm ]]; then echo "ERROR: /dev/kvm missing - nested virt not active"; exit 1; fi

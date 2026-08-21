@@ -10,6 +10,8 @@
 : "${OCP_VERSION:=stable-4.22}"
 : "${INSTANCE_TYPE:=m8i.12xlarge}"
 : "${SSH_PUBLIC_KEY_FILE:=$HOME/.ssh/id_rsa.pub}"
+: "${HOST_SSH_USER:=fedora}"          # default cloud user of the host AMI (Fedora)
+: "${FEDORA_RELEASE:=44}"             # host AMI: Fedora Cloud Base release
 : "${CONTROL_PLANE_COUNT:=3}"
 : "${WORKER_COUNT:=3}"
 : "${EC2_VOLUME_SIZE_GB:=1000}"
@@ -95,17 +97,33 @@ retry() {
 }
 
 # ---------------------------------------------------------------------------
-# SSH / SCP to the EC2 host (ec2-user on Amazon Linux 2023)
+# SSH / SCP to the EC2 host (default user set by HOST_SSH_USER; Fedora = fedora)
 # ---------------------------------------------------------------------------
 _ssh_opts=(-i "$PRIV_KEY" -o StrictHostKeyChecking=no
            -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR
-           -o ConnectTimeout=15)
+           -o ConnectTimeout=15
+           # Keepalives so long attached commands (e.g. `wait-for` streaming
+           # through the quiet "Waiting for bootkube" window) aren't dropped as
+           # idle by NAT/the server: probe every 30s, give up after ~5m silent.
+           -o ServerAliveInterval=30 -o ServerAliveCountMax=10)
 
 host_ip() { state_get eip; }
 
-ssh_host() { ssh "${_ssh_opts[@]}" "ec2-user@$(host_ip)" "$@"; }
-scp_to()   { scp "${_ssh_opts[@]}" "$1" "ec2-user@$(host_ip):$2"; }
-scp_from() { scp "${_ssh_opts[@]}" "ec2-user@$(host_ip):$1" "$2"; }
+ssh_host() { ssh "${_ssh_opts[@]}" "${HOST_SSH_USER}@$(host_ip)" "$@"; }
+scp_to()   { scp "${_ssh_opts[@]}" "$1" "${HOST_SSH_USER}@$(host_ip):$2"; }
+scp_from() { scp "${_ssh_opts[@]}" "${HOST_SSH_USER}@$(host_ip):$1" "$2"; }
+
+# SSH to a cluster node (core@<node-ip>) by jumping through the EC2 host; the
+# node network (192.168.126.0/24) is only reachable from the host. Used by the
+# progress monitor and credential recovery to read ground truth on a node.
+# Uses ProxyCommand (not ProxyJump) so the SAME StrictHostKeyChecking=no /
+# UserKnownHostsFile=/dev/null options apply to the *jump* host too — ProxyJump
+# would only apply them to the final hop and prompt to accept the host key.
+ssh_node() {
+  local ip="$1"; shift
+  local jump="ssh ${_ssh_opts[*]} -W %h:%p ${HOST_SSH_USER}@$(host_ip)"
+  ssh "${_ssh_opts[@]}" -o "ProxyCommand=${jump}" "core@${ip}" "$@"
+}
 
 # ---------------------------------------------------------------------------
 # Node topology. Populates parallel arrays used across modules.

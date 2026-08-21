@@ -37,9 +37,13 @@ EOS
   ok "Domains defined"
 
   # Record UUIDs (sushy uses the domain UUID as the Redfish System id).
+  # Must use sudo: the domains live in qemu:///system (root), whereas an
+  # unprivileged `virsh` would query the empty qemu:///session. The trailing
+  # `|| true` keeps a lookup failure from tripping set -e / pipefail.
   for i in "${!NODE_NAME[@]}"; do
     local uuid
-    uuid="$(ssh_host "virsh domuuid '${NODE_NAME[$i]}'" 2>/dev/null | tr -d '\r' | head -1)"
+    uuid="$(ssh_host "sudo virsh domuuid '${NODE_NAME[$i]}'" 2>/dev/null | tr -d '\r' | head -1 || true)"
+    [[ -n "$uuid" ]] || warn "could not read UUID for ${NODE_NAME[$i]} (fencing wiring will be incomplete)"
     state_set "uuid_${NODE_NAME[$i]}" "$uuid"
   done
 }
@@ -47,11 +51,18 @@ EOS
 # Boot all domains from the agent ISO (called after the ISO exists on host).
 vms_boot() {
   compute_nodes
-  log "Attaching agent ISO and powering on all domains"
-  local i name
+  log "Powering on all domains (boot from agent ISO)"
+  local i name st
   for i in "${!NODE_NAME[@]}"; do
     name="${NODE_NAME[$i]}"
-    ssh_host "sudo virsh start '${name}'" >/dev/null 2>&1 || warn "start ${name} failed"
+    st="$(ssh_host "sudo virsh domstate '${name}'" 2>/dev/null | tr -d '\r' | head -1 || true)"
+    if [[ "$st" == "running" ]]; then
+      log "${name} already running"
+    elif ssh_host "sudo virsh start '${name}'" >/dev/null 2>&1; then
+      log "${name} started"
+    else
+      warn "start ${name} failed"
+    fi
   done
   ok "All domains powered on (installing from agent ISO)"
 }
@@ -69,7 +80,9 @@ if [[ ! -f /etc/rhwa-sushy/cert.pem ]]; then
     -days 3650 -subj "/CN=${NET_GATEWAY}" >/dev/null 2>&1
 fi
 # Basic-auth file so fence_redfish credentials are honored.
-sudo htpasswd -bc /etc/rhwa-sushy/htpasswd '${SUSHY_USER}' '${SUSHY_PASS}' >/dev/null 2>&1
+# sushy-tools ONLY accepts bcrypt-hashed entries (-B); the Apache-MD5 default
+# makes the emulator refuse to start with "Only bcrypt digested passwords...".
+sudo htpasswd -bcB /etc/rhwa-sushy/htpasswd '${SUSHY_USER}' '${SUSHY_PASS}' >/dev/null 2>&1
 sudo tee /etc/rhwa-sushy/sushy-emulator.conf >/dev/null <<CONF
 SUSHY_EMULATOR_LISTEN_IP = u'0.0.0.0'
 SUSHY_EMULATOR_LISTEN_PORT = ${SUSHY_PORT}
@@ -88,10 +101,15 @@ sudo podman run -d --name sushy --restart always \
   sushy-emulator --config /etc/sushy/sushy-emulator.conf >/dev/null
 echo "sushy started"
 EOS
-  # Verify it answers
-  retry 12 5 -- ssh_host "curl -sk -u '${SUSHY_USER}:${SUSHY_PASS}' https://${NET_GATEWAY}:${SUSHY_PORT}/redfish/v1/Systems >/dev/null" \
-    || warn "sushy-tools did not answer on ${NET_GATEWAY}:${SUSHY_PORT}"
-  ok "sushy-tools serving Redfish at https://${NET_GATEWAY}:${SUSHY_PORT}"
+  # Verify it answers; a dead BMC layer means fencing (and the install's
+  # power control) cannot work, so fail hard with the container logs.
+  if retry 12 5 -- ssh_host "curl -sk -u '${SUSHY_USER}:${SUSHY_PASS}' https://${NET_GATEWAY}:${SUSHY_PORT}/redfish/v1/Systems >/dev/null"; then
+    ok "sushy-tools serving Redfish at https://${NET_GATEWAY}:${SUSHY_PORT}"
+  else
+    warn "sushy-tools did not answer; last container logs:"
+    ssh_host "sudo podman logs --tail 30 sushy 2>&1 || true" >&2 || true
+    die "sushy-tools is not serving Redfish on ${NET_GATEWAY}:${SUSHY_PORT}."
+  fi
 }
 
 vms_teardown() {

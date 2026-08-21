@@ -4,6 +4,7 @@
 #
 # Usage:
 #   ./rhwa-lab create     Provision everything end-to-end
+#   ./rhwa-lab monitor    Live, phase-aware install progress (safe any time)
 #   ./rhwa-lab test       Trigger + verify a fence_redfish remediation
 #   ./rhwa-lab status     Show endpoints, credentials, uptime
 #   ./rhwa-lab destroy    Tear everything down (incl. Route53 records)
@@ -24,11 +25,13 @@ source "${SELF_DIR}/lib/openshift.sh"
 source "${SELF_DIR}/lib/rhwa.sh"
 source "${SELF_DIR}/lib/testfence.sh"
 
-usage() { sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 check_inputs() {
   require_cmds aws jq curl ssh scp tar openssl
-  require_env AWS_REGION ROUTE53_ZONE_ID PULL_SECRET
+  # ROUTE53_ZONE_ID is optional: unset -> resolved from BASE_DOMAIN; may be a
+  # zone id (Z...) or a domain name. See resolve_r53_zone in lib/aws.sh.
+  require_env AWS_REGION PULL_SECRET
   if [[ -z "${AWS_PROFILE:-}" ]]; then
     require_env AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
   fi
@@ -82,6 +85,27 @@ cmd_create() {
   report
 }
 
+cmd_monitor() {
+  state_init
+  [[ -n "$(state_get eip)" ]] || die "No instance recorded for '${CLUSTER_NAME}'; run create first."
+  compute_nodes
+  log "Monitoring install progress for '${CLUSTER_NAME}' (Ctrl-C to stop)"
+  while true; do
+    printf '\033[2J\033[H' >&2   # clear screen for a stable, refreshing view
+    printf '\033[1;34m== %s  RHWA lab: %s ==\033[0m\n' "$(_ts)" "${CLUSTER_NAME}" >&2
+    printf '\033[1;34m-- openshift-install log (tail) --\033[0m\n' >&2
+    os_installer_log_tail 30
+    printf '\033[1;34m-- cluster status --\033[0m\n' >&2
+    if os_cluster_status_via_recovery; then
+      ok "Install complete (ClusterVersion Available=True)."
+      break
+    else
+      printf '  (API not serving yet — see installer log above)\n' >&2
+    fi
+    sleep 20
+  done
+}
+
 cmd_test() { check_inputs; test_fence; }
 
 cmd_destroy() {
@@ -108,15 +132,20 @@ cmd_status() {
     echo "Instance state : ${st}  (launched ${launch})  [billing runs while 'running']"
   fi
   echo "Elastic IP     : ${eip:-<none>}"
-  echo "Console        : $(console_url)"
-  echo "API            : https://$(api_fqdn):6443"
-  if [[ "$(state_get cluster_installed)" == "yes" ]]; then
-    if curl -fskm 5 "https://$(api_fqdn):6443/healthz" >/dev/null 2>&1; then
-      echo "API reachable  : yes"
-    else
+
+  # When the cluster is installed AND its API is reachable, print the exact same
+  # READY block as `create` does (endpoints + credentials) so status is a
+  # one-stop reference. Otherwise fall back to diagnostic lines.
+  if [[ "$(state_get cluster_installed)" == "yes" ]] \
+     && curl -fskm 5 "https://$(api_fqdn):6443/healthz" >/dev/null 2>&1; then
+    report
+  else
+    echo "Console        : $(console_url)"
+    echo "API            : https://$(api_fqdn):6443"
+    if [[ "$(state_get cluster_installed)" == "yes" ]]; then
       echo "API reachable  : no (VIP/haproxy/cluster may be down)"
+      echo "kubeconfig     : ${KUBECONFIG_LOCAL}"
     fi
-    echo "kubeconfig     : ${KUBECONFIG_LOCAL}"
   fi
 }
 
@@ -124,6 +153,7 @@ main() {
   local cmd="${1:-help}"; shift || true
   case "$cmd" in
     create)  cmd_create  "$@" ;;
+    monitor) cmd_monitor "$@" ;;
     test)    cmd_test    "$@" ;;
     destroy) cmd_destroy "$@" ;;
     status)  cmd_status  "$@" ;;
