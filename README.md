@@ -41,6 +41,7 @@ export PULL_SECRET="$(cat ~/pull-secret.json)"
 ./rhwa-lab monitor    # live, phase-aware install progress (safe to run any time)
 ./rhwa-lab status     # show endpoints, credentials, uptime
 ./rhwa-lab test       # trigger and verify a fence_redfish remediation
+./rhwa-lab install-config > install-config.yaml  # sanitized config (no pull secret)
 ./rhwa-lab destroy    # tear everything down, including Route53 records
 ```
 

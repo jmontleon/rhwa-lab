@@ -29,14 +29,20 @@ os_local_oc() {
   ok "Local oc at ${BIN_DIR}/oc"
 }
 
-# Render install-config.yaml + agent-config.yaml locally, then scp to host.
-os_render_configs() {
-  compute_nodes
-  local dir="${CLUSTER_DIR}/install"
-  mkdir -p "$dir"
-  local sshkey; sshkey="$(<"$SSH_PUBLIC_KEY_FILE")"
-
-  cat > "${dir}/install-config.yaml" <<EOF
+# Emit install-config.yaml to stdout. $1 = the pullSecret value to embed; pass
+# a placeholder (e.g. '{"auths":{}}') to produce a sanitized, secret-free
+# config. The sshKey is a *public* key (not a credential) so it is included
+# verbatim when readable, else a clearly-marked placeholder. Keeping this the
+# single source of the install-config keeps the real render and the sanitized
+# `install-config` command from drifting.
+_emit_install_config() {
+  local pull="$1" sshkey
+  if [[ -r "$SSH_PUBLIC_KEY_FILE" ]]; then
+    sshkey="$(<"$SSH_PUBLIC_KEY_FILE")"
+  else
+    sshkey="ssh-ed25519 AAAA...placeholder... sanitized@rhwa-lab"
+  fi
+  cat <<EOF
 apiVersion: v1
 baseDomain: ${BASE_DOMAIN}
 metadata:
@@ -62,9 +68,25 @@ platform:
     - ${API_VIP}
     ingressVIPs:
     - ${INGRESS_VIP}
-pullSecret: '${PULL_SECRET}'
+pullSecret: '${pull}'
 sshKey: '${sshkey}'
 EOF
+}
+
+# Print a sanitized install-config.yaml (pull secret replaced with an empty
+# placeholder) to stdout, for external test suites that require the file.
+# Redirect it: `./rhwa-lab install-config > install-config.yaml`.
+os_sanitized_install_config() {
+  _emit_install_config '{"auths":{}}'
+}
+
+# Render install-config.yaml + agent-config.yaml locally, then scp to host.
+os_render_configs() {
+  compute_nodes
+  local dir="${CLUSTER_DIR}/install"
+  mkdir -p "$dir"
+
+  _emit_install_config "$PULL_SECRET" > "${dir}/install-config.yaml"
 
   # agent-config with per-node static networking (nmstate).
   {

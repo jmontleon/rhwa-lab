@@ -7,6 +7,7 @@
 #   ./rhwa-lab monitor    Live, phase-aware install progress (safe any time)
 #   ./rhwa-lab test       Trigger + verify a fence_redfish remediation
 #   ./rhwa-lab status     Show endpoints, credentials, uptime
+#   ./rhwa-lab install-config  Print a sanitized install-config.yaml (no secrets)
 #   ./rhwa-lab destroy    Tear everything down (incl. Route53 records)
 #   ./rhwa-lab help       Show this help
 #
@@ -25,7 +26,7 @@ source "${SELF_DIR}/lib/openshift.sh"
 source "${SELF_DIR}/lib/rhwa.sh"
 source "${SELF_DIR}/lib/testfence.sh"
 
-usage() { sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 check_inputs() {
   require_cmds aws jq curl ssh scp tar openssl
@@ -108,6 +109,11 @@ cmd_monitor() {
 
 cmd_test() { check_inputs; test_fence; }
 
+# Print a sanitized install-config.yaml (no pull secret) to stdout. Uses the
+# same renderer as `create`, so it matches the real config for the current
+# CLUSTER_NAME/env. Does NOT require an existing cluster or PULL_SECRET.
+cmd_install_config() { os_sanitized_install_config; }
+
 cmd_destroy() {
   require_cmds aws
   state_init
@@ -155,6 +161,7 @@ main() {
     create)  cmd_create  "$@" ;;
     monitor) cmd_monitor "$@" ;;
     test)    cmd_test    "$@" ;;
+    install-config) cmd_install_config "$@" ;;
     destroy) cmd_destroy "$@" ;;
     status)  cmd_status  "$@" ;;
     help|-h|--help) usage ;;
