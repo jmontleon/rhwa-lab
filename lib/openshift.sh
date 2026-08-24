@@ -29,18 +29,24 @@ os_local_oc() {
   ok "Local oc at ${BIN_DIR}/oc"
 }
 
-# Emit install-config.yaml to stdout. $1 = the pullSecret value to embed; pass
-# a placeholder (e.g. '{"auths":{}}') to produce a sanitized, secret-free
-# config. The sshKey is a *public* key (not a credential) so it is included
-# verbatim when readable, else a clearly-marked placeholder. Keeping this the
-# single source of the install-config keeps the real render and the sanitized
-# `install-config` command from drifting.
+# Emit install-config.yaml to stdout.
+#   $1 = pullSecret value to embed; pass a placeholder (e.g. '{"auths":{}}')
+#        for a sanitized, secret-free config.
+#   $2 = sshKey value to embed (optional). If omitted, the real public key
+#        from SSH_PUBLIC_KEY_FILE is used (what a real cluster needs). Pass an
+#        explicit placeholder to keep even the public key out of sanitized
+#        output — it identifies the operator and isn't needed to validate the
+#        config's schema/topology.
+# Keeping this the single source of the install-config keeps the real render
+# and the sanitized `install-config` command from drifting.
 _emit_install_config() {
-  local pull="$1" sshkey
-  if [[ -r "$SSH_PUBLIC_KEY_FILE" ]]; then
-    sshkey="$(<"$SSH_PUBLIC_KEY_FILE")"
-  else
-    sshkey="ssh-ed25519 AAAA...placeholder... sanitized@rhwa-lab"
+  local pull="$1" sshkey="${2:-}"
+  if [[ -z "$sshkey" ]]; then
+    if [[ -r "$SSH_PUBLIC_KEY_FILE" ]]; then
+      sshkey="$(<"$SSH_PUBLIC_KEY_FILE")"
+    else
+      sshkey="ssh-ed25519 AAAA...placeholder... sanitized@rhwa-lab"
+    fi
   fi
   cat <<EOF
 apiVersion: v1
@@ -73,11 +79,12 @@ sshKey: '${sshkey}'
 EOF
 }
 
-# Print a sanitized install-config.yaml (pull secret replaced with an empty
-# placeholder) to stdout, for external test suites that require the file.
-# Redirect it: `./rhwa-lab install-config > install-config.yaml`.
+# Print a sanitized install-config.yaml to stdout for external test suites that
+# require the file: both the pull secret AND the operator's public SSH key are
+# replaced with placeholders. Redirect it:
+#   `./rhwa-lab install-config > install-config.yaml`
 os_sanitized_install_config() {
-  _emit_install_config '{"auths":{}}'
+  _emit_install_config '{"auths":{}}' 'ssh-ed25519 AAAA...redacted... sanitized@rhwa-lab'
 }
 
 # Render install-config.yaml + agent-config.yaml locally, then scp to host.
