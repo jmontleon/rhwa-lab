@@ -59,10 +59,42 @@ spec:
   source: redhat-operators
   sourceNamespace: openshift-marketplace
   installPlanApproval: Automatic
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: self-node-remediation
+  namespace: ${RHWA_NAMESPACE}
+spec:
+  channel: ${RHWA_CHANNEL}
+  name: self-node-remediation
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
 EOF
   # Non-fatal: warn and continue so `test` can surface any real problem.
   _wait_csv "node-healthcheck-operator" || true
   _wait_csv "fence-agents-remediation" || true
+  _wait_csv "self-node-remediation" || true
+  # SNR auto-creates a default SelfNodeRemediationConfig on startup; confirm it
+  # appears so consumers (and SNR test suites) find it configured.
+  _wait_snr_config || true
+}
+
+# Wait for SNR's default SelfNodeRemediationConfig CR to be created by the
+# operator (it manages this singleton itself; we don't create it).
+_wait_snr_config() {
+  local i
+  for ((i=0; i<40; i++)); do
+    if oc -n "$RHWA_NAMESPACE" get selfnoderemediationconfig self-node-remediation-config \
+         >/dev/null 2>&1; then
+      ok "SelfNodeRemediationConfig 'self-node-remediation-config' exists"
+      return 0
+    fi
+    sleep 15
+  done
+  warn "SelfNodeRemediationConfig did not appear; check the self-node-remediation operator."
+  return 1
 }
 
 # Build the per-node "--systems-uri" nodeparameters block (Node name -> URI).
