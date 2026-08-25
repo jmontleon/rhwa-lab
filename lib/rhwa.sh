@@ -127,12 +127,10 @@ spec:
         "--ipport": "${SUSHY_PORT}"
         "--username": "${SUSHY_USER}"
         "--password": "${SUSHY_PASS}"
-        "--ssl-insecure": ""
+        "--ssl-insecure": "1"
       nodeparameters:
 $(_far_nodeparams)
 EOF
-  # ITERATE: valueless flags (--ssl-insecure) and exact param names for
-  # fence_redfish may need tuning; check the FAR pod logs on first test.
 
   oc apply -f - <<EOF
 apiVersion: remediation.medik8s.io/v1alpha1

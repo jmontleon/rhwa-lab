@@ -90,14 +90,27 @@ aws_security_group() {
 
   myip="$(curl -fsS https://checkip.amazonaws.com 2>/dev/null || echo '0.0.0.0')"
   myip="${myip%%$'\n'*}/32"
-  # SSH restricted to caller; cluster ports open to the internet (per design).
+  # All ports restricted to caller; use `./rhwa-lab allow` to open for others.
   _sg_allow() { aws ec2 authorize-security-group-ingress --group-id "$sg" \
                   --ip-permissions "$1" >/dev/null 2>&1 || true; }
   _sg_allow "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=${myip}}]"
-  _sg_allow "IpProtocol=tcp,FromPort=6443,ToPort=6443,IpRanges=[{CidrIp=0.0.0.0/0}]"
-  _sg_allow "IpProtocol=tcp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=0.0.0.0/0}]"
-  _sg_allow "IpProtocol=tcp,FromPort=80,ToPort=80,IpRanges=[{CidrIp=0.0.0.0/0}]"
-  ok "Security group rules applied (ssh from ${myip}; 6443/443/80 open)"
+  _sg_allow "IpProtocol=tcp,FromPort=6443,ToPort=6443,IpRanges=[{CidrIp=${myip}}]"
+  _sg_allow "IpProtocol=tcp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=${myip}}]"
+  _sg_allow "IpProtocol=tcp,FromPort=80,ToPort=80,IpRanges=[{CidrIp=${myip}}]"
+  ok "Security group rules applied (all ports from ${myip})"
+}
+
+aws_sg_allow() {
+  local cidr="$1" sg
+  sg="$(state_get sg_id)"
+  [[ -n "$sg" ]] || die "No security group recorded; run create first."
+  local port
+  for port in 6443 443 80 22; do
+    aws ec2 authorize-security-group-ingress --group-id "$sg" \
+      --ip-permissions "IpProtocol=tcp,FromPort=${port},ToPort=${port},IpRanges=[{CidrIp=${cidr}}]" \
+      >/dev/null 2>&1 || true
+  done
+  ok "Allowed ${cidr} on ports 22/80/443/6443"
 }
 
 aws_launch_instance() {
