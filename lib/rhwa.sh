@@ -155,10 +155,10 @@ spec:
   unhealthyConditions:
   - type: Ready
     status: "False"
-    duration: 300s
+    duration: 60s
   - type: Ready
     status: Unknown
-    duration: 300s
+    duration: 60s
 EOF
   ok "RHWA fencing configured (fence_redfish -> https://${NET_GATEWAY}:${SUSHY_PORT})"
 }

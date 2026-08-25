@@ -28,7 +28,7 @@ test_fence() {
     sleep 10
   done
 
-  log "Waiting for NodeHealthCheck to create a FenceAgentsRemediation (unhealthy duration is 300s)..."
+  log "Waiting for NodeHealthCheck to create a FenceAgentsRemediation (unhealthy duration is 60s)..."
   local far=""
   for ((i=0; i<40; i++)); do
     far="$(oc get fenceagentsremediation.fence-agents-remediation.medik8s.io -A \
