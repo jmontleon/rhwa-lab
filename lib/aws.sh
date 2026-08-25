@@ -94,10 +94,10 @@ aws_security_group() {
   _sg_allow() { aws ec2 authorize-security-group-ingress --group-id "$sg" \
                   --ip-permissions "$1" >/dev/null 2>&1 || true; }
   _sg_allow "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=${myip}}]"
-  _sg_allow "IpProtocol=tcp,FromPort=6443,ToPort=6443,IpRanges=[{CidrIp=0.0.0.0/0}]"
-  _sg_allow "IpProtocol=tcp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=0.0.0.0/0}]"
-  _sg_allow "IpProtocol=tcp,FromPort=80,ToPort=80,IpRanges=[{CidrIp=0.0.0.0/0}]"
-  ok "Security group rules applied (ssh from ${myip}; 6443/443/80 open)"
+  _sg_allow "IpProtocol=tcp,FromPort=6443,ToPort=6443,IpRanges=[{CidrIp=${myip}}]"
+  _sg_allow "IpProtocol=tcp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=${myip}}]"
+  _sg_allow "IpProtocol=tcp,FromPort=80,ToPort=80,IpRanges=[{CidrIp=${myip}}]"
+  ok "Security group rules applied (all traffic from ${myip})"
 }
 
 aws_launch_instance() {

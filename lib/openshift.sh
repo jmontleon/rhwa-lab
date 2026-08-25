@@ -94,6 +94,7 @@ os_render_configs() {
   mkdir -p "$dir"
 
   _emit_install_config "$PULL_SECRET" > "${dir}/install-config.yaml"
+  chmod 600 "${dir}/install-config.yaml"
 
   # agent-config with per-node static networking (nmstate).
   {
