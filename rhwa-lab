@@ -8,6 +8,7 @@
 #   ./rhwa-lab test       Trigger + verify a fence_redfish remediation
 #   ./rhwa-lab status     Show endpoints, credentials, uptime
 #   ./rhwa-lab install-config  Print a sanitized install-config.yaml (no secrets)
+#   ./rhwa-lab allow [IP]  Allow another IP (or 'all') through the firewall
 #   ./rhwa-lab destroy    Tear everything down (incl. Route53 records)
 #   ./rhwa-lab help       Show this help
 #
@@ -36,7 +37,7 @@ source "${SELF_DIR}/lib/openshift.sh"
 source "${SELF_DIR}/lib/rhwa.sh"
 source "${SELF_DIR}/lib/testfence.sh"
 
-usage() { sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 check_inputs() {
   require_cmds aws jq curl ssh scp tar openssl
@@ -67,8 +68,9 @@ $(printf '\033[1;32m')==========================================================
  Test fencing:   ./rhwa-lab test
  Tear it down:   ./rhwa-lab destroy
 
- SECURITY: All ports are restricted to the IP that ran 'create'.
- If your IP changes, update the security group or re-run create.
+ SECURITY: Ports are restricted to the IP that ran 'create'.
+ Share access:  ./rhwa-lab allow <colleague-IP>
+                ./rhwa-lab allow all
 EOF
 }
 
@@ -126,6 +128,22 @@ cmd_test() { check_inputs; test_fence; }
 # CLUSTER_NAME/env. Does NOT require an existing cluster or PULL_SECRET.
 cmd_install_config() { os_sanitized_install_config; }
 
+cmd_allow() {
+  require_cmds aws curl
+  state_init
+  local target="${1:-}"
+  if [[ -z "$target" ]]; then
+    target="$(curl -fsS https://checkip.amazonaws.com 2>/dev/null || die "Could not detect IP.")"
+    target="${target%%$'\n'*}/32"
+    log "No IP specified; using your current IP: ${target}"
+  elif [[ "$target" == "all" ]]; then
+    target="0.0.0.0/0"
+  elif [[ "$target" != */* ]]; then
+    target="${target}/32"
+  fi
+  aws_sg_allow "$target"
+}
+
 cmd_destroy() {
   require_cmds aws
   state_init
@@ -174,6 +192,7 @@ main() {
     monitor) cmd_monitor "$@" ;;
     test)    cmd_test    "$@" ;;
     install-config) cmd_install_config "$@" ;;
+    allow)   cmd_allow   "$@" ;;
     destroy) cmd_destroy "$@" ;;
     status)  cmd_status  "$@" ;;
     help|-h|--help) usage ;;
