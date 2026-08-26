@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# rhwa.sh - install RHWA operators (Fence Agents Remediation + Node Health
-# Check) from the Red Hat catalog via OLM, then wire fence_redfish against
-# the sushy-tools emulated BMCs.
+# rhwa.sh - install RHWA operators (Node Health Check, Fence Agents
+# Remediation, Self Node Remediation, Node Maintenance) from the Red Hat
+# catalog via OLM, then wire fence_redfish against the sushy-tools emulated
+# BMCs.
 
 # Wait for a CSV whose name starts with <prefix> to reach Succeeded.
 _wait_csv() {
@@ -71,11 +72,25 @@ spec:
   source: redhat-operators
   sourceNamespace: openshift-marketplace
   installPlanApproval: Automatic
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: node-maintenance-operator
+  namespace: ${RHWA_NAMESPACE}
+spec:
+  channel: ${RHWA_CHANNEL}
+  name: node-maintenance-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
 EOF
   # Non-fatal: warn and continue so `test` can surface any real problem.
   _wait_csv "node-healthcheck-operator" || true
   _wait_csv "fence-agents-remediation" || true
   _wait_csv "self-node-remediation" || true
+  # NMO has no singleton config/DaemonSet; it just watches NodeMaintenance CRs.
+  _wait_csv "node-maintenance-operator" || true
   # SNR auto-creates a default SelfNodeRemediationConfig on startup; confirm it
   # appears so consumers (and SNR test suites) find it configured.
   _wait_snr_config || true

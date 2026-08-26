@@ -73,7 +73,8 @@ These are the spots most likely to need a fix on the first real run:
    empty value; FAR's parameter handling may need adjustment (check FAR pod
    logs during `test`).
 5. **Operator package names/channels** in the Red Hat catalog
-   (`fence-agents-remediation`, `node-healthcheck-operator`, channel `stable`).
+   (`node-healthcheck-operator`, `fence-agents-remediation`,
+   `self-node-remediation`, `node-maintenance-operator`, channel `stable`).
 6. **Host distro** — the EC2 host runs **Fedora Cloud Base** (owner
    `125523088429`, release `FEDORA_RELEASE`, default 44), which ships the full
    virtualization stack; AL2023 does not. Override the image with `HOST_AMI`
