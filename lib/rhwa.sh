@@ -176,7 +176,76 @@ EOF
   ok "RHWA fencing configured (fence_redfish -> https://${NET_GATEWAY}:${SUSHY_PORT})"
 }
 
+# Populate each node's BareMetalHost with its sushy-tools Redfish BMC address
+# and credentials so metal3/ironic power-manages the node (and so test suites
+# that expect .spec.bmc.address find it). The BMC address reuses the exact
+# node -> libvirt-UUID map and sushy creds that FAR's fence_redfish uses.
+#
+# Agent-based installs create these BMHs as externally provisioned with no BMC.
+# We add the BMC block but deliberately do NOT flip externallyProvisioned or
+# touch bootMACAddress: clearing externallyProvisioned would make ironic try to
+# (re)provision — i.e. wipe — the already-running node.
+rhwa_configure_bmh() {
+  compute_nodes
+  local mapi="openshift-machine-api"
+  log "Configuring BareMetalHost BMC address + credentials for each node"
+  local i name uuid addr secret
+  for i in "${!NODE_HOST[@]}"; do
+    name="${NODE_HOST[$i]}"
+    uuid="$(state_get "uuid_${NODE_NAME[$i]}")"
+    if [[ -z "$uuid" ]]; then
+      warn "no libvirt UUID for ${name}; skipping BMH BMC config"
+      continue
+    fi
+    addr="redfish://${NET_GATEWAY}:${SUSHY_PORT}/redfish/v1/Systems/${uuid}"
+    secret="${name}-bmc-secret"
+
+    # Per-node BMC credentials Secret (metal3 reads keys 'username'/'password').
+    oc apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${secret}
+  namespace: ${mapi}
+type: Opaque
+stringData:
+  username: "${SUSHY_USER}"
+  password: "${SUSHY_PASS}"
+EOF
+
+    if oc -n "$mapi" get baremetalhost "$name" >/dev/null 2>&1; then
+      # Existing (installer-created) BMH: add only the BMC block + online; leave
+      # externallyProvisioned / bootMACAddress untouched (see note above). sushy
+      # serves a self-signed cert, so disable verification.
+      oc -n "$mapi" patch baremetalhost "$name" --type merge -p \
+        "{\"spec\":{\"online\":true,\"bmc\":{\"address\":\"${addr}\",\"credentialsName\":\"${secret}\",\"disableCertificateVerification\":true}}}"
+      ok "BMH ${name}: BMC set -> ${addr}"
+    else
+      # No installer BMH (unexpected on baremetal ABI): create a power-only,
+      # externally provisioned host so ironic manages power without provisioning.
+      warn "BareMetalHost ${name} not found; creating an externally-provisioned one"
+      oc apply -f - <<EOF
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: ${name}
+  namespace: ${mapi}
+spec:
+  online: true
+  externallyProvisioned: true
+  bootMACAddress: ${NODE_MAC[$i]}
+  bmc:
+    address: ${addr}
+    credentialsName: ${secret}
+    disableCertificateVerification: true
+EOF
+      ok "BMH ${name}: created with BMC ${addr}"
+    fi
+  done
+}
+
 rhwa_setup() {
   rhwa_install_operators
   rhwa_configure_fencing
+  rhwa_configure_bmh
 }

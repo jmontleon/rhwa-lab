@@ -75,6 +75,12 @@ These are the spots most likely to need a fix on the first real run:
 5. **Operator package names/channels** in the Red Hat catalog
    (`node-healthcheck-operator`, `fence-agents-remediation`,
    `self-node-remediation`, `node-maintenance-operator`, channel `stable`).
+8. **BareMetalHost BMC wiring** — each node's BMH is populated with its
+   sushy-tools Redfish `bmc.address` + credentials Secret and left **fully
+   managed**, so metal3/ironic power-manages it in addition to FAR. Both drive
+   the same Redfish endpoint; if you see unexpected power actions, this is the
+   place to look (`spec.bmc` is set without flipping `externallyProvisioned`, so
+   ironic manages power but never re-provisions the running node).
 6. **Host distro** — the EC2 host runs **Fedora Cloud Base** (owner
    `125523088429`, release `FEDORA_RELEASE`, default 44), which ships the full
    virtualization stack; AL2023 does not. Override the image with `HOST_AMI`
