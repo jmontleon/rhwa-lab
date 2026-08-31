@@ -87,7 +87,15 @@ sudo tee /etc/rhwa-sushy/sushy-emulator.conf >/dev/null <<CONF
 SUSHY_EMULATOR_LISTEN_IP = u'0.0.0.0'
 SUSHY_EMULATOR_LISTEN_PORT = ${SUSHY_PORT}
 SUSHY_EMULATOR_LIBVIRT_URI = u'qemu:///system'
+# Keep boot-device overrides ignored: BMHs use the redfish-virtualmedia driver,
+# and honoring a "boot from CD" override could divert a FAR-triggered reboot
+# into the still-attached agent ISO instead of the installed disk. With this
+# True, reboots always follow libvirt's uefi,hd,cdrom order (-> disk).
 SUSHY_EMULATOR_IGNORE_BOOT_DEVICE = True
+# Don't verify TLS of remote image URLs on virtual-media insert (ironic serves
+# images with a self-signed cert). Only exercised if a host is ever managed for
+# provisioning; harmless otherwise.
+SUSHY_EMULATOR_VMEDIA_VERIFY_SSL = False
 SUSHY_EMULATOR_SSL_CERT = u'/etc/sushy/cert.pem'
 SUSHY_EMULATOR_SSL_KEY = u'/etc/sushy/key.pem'
 SUSHY_EMULATOR_AUTH_FILE = u'/etc/sushy/htpasswd'

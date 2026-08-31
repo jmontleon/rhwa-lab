@@ -181,6 +181,13 @@ EOF
 # that expect .spec.bmc.address find it). The BMC address reuses the exact
 # node -> libvirt-UUID map and sushy creds that FAR's fence_redfish uses.
 #
+# Address scheme is redfish-virtualmedia:// (metal3's virtual-media driver);
+# the VMs are UEFI with a cdrom device, which that driver requires. Because the
+# hosts stay externallyProvisioned (see below), ironic only power-manages them
+# and never actually inserts media, and sushy is configured with
+# SUSHY_EMULATOR_IGNORE_BOOT_DEVICE=True so a boot-device override can never
+# divert a FAR-triggered reboot into the still-attached agent ISO.
+#
 # Agent-based installs create these BMHs as externally provisioned with no BMC.
 # We add the BMC block but deliberately do NOT flip externallyProvisioned or
 # touch bootMACAddress: clearing externallyProvisioned would make ironic try to
@@ -197,7 +204,7 @@ rhwa_configure_bmh() {
       warn "no libvirt UUID for ${name}; skipping BMH BMC config"
       continue
     fi
-    addr="redfish://${NET_GATEWAY}:${SUSHY_PORT}/redfish/v1/Systems/${uuid}"
+    addr="redfish-virtualmedia://${NET_GATEWAY}:${SUSHY_PORT}/redfish/v1/Systems/${uuid}"
     secret="${name}-bmc-secret"
 
     # Per-node BMC credentials Secret (metal3 reads keys 'username'/'password').
