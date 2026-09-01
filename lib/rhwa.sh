@@ -251,8 +251,65 @@ EOF
   done
 }
 
+# Create a BareMetalHost for each SPARE worker: BMC configured (address +
+# credentials) so a test can later provision it, but PAUSED so metal3 takes NO
+# action now — no inspect, no provision, no power change — until a test removes
+# the pause annotation. externallyProvisioned is intentionally left false (the
+# host IS meant to be provisioned later) and bootMACAddress is set for that
+# future provision. Because the spare's root disk is empty, a virtual-media
+# provision still boots the inserted media via UEFI fallthrough (hd empty ->
+# cdrom), so keeping sushy's IGNORE_BOOT_DEVICE=True does not block it.
+rhwa_configure_spare_bmh() {
+  compute_spares
+  [[ ${#SPARE_NAME[@]} -gt 0 ]] || return 0
+  local mapi="openshift-machine-api"
+  log "Configuring paused BareMetalHost(s) for ${#SPARE_NAME[@]} spare worker(s)"
+  local i name uuid addr secret
+  for i in "${!SPARE_NAME[@]}"; do
+    name="${SPARE_HOST[$i]}"
+    uuid="$(state_get "uuid_${SPARE_NAME[$i]}")"
+    if [[ -z "$uuid" ]]; then
+      warn "no libvirt UUID for spare ${name}; skipping BMH"
+      continue
+    fi
+    addr="redfish-virtualmedia://${NET_GATEWAY}:${SUSHY_PORT}/redfish/v1/Systems/${uuid}"
+    secret="${name}-bmc-secret"
+    oc apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${secret}
+  namespace: ${mapi}
+type: Opaque
+stringData:
+  username: "${SUSHY_USER}"
+  password: "${SUSHY_PASS}"
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: ${name}
+  namespace: ${mapi}
+  annotations:
+    # Paused: metal3 records the host but performs NO inspect/provision/power
+    # action. Remove this annotation in a test to make the host available, then
+    # provision it (e.g. create a Machine or scale a MachineSet).
+    baremetalhost.metal3.io/paused: "rhwa-lab: spare worker; unpause to provision"
+spec:
+  online: false
+  bootMACAddress: ${SPARE_MAC[$i]}
+  bmc:
+    address: ${addr}
+    credentialsName: ${secret}
+    disableCertificateVerification: true
+EOF
+    ok "Spare BMH ${name}: BMC set (paused, unprovisioned) -> ${addr}"
+  done
+}
+
 rhwa_setup() {
   rhwa_install_operators
   rhwa_configure_fencing
   rhwa_configure_bmh
+  rhwa_configure_spare_bmh
 }

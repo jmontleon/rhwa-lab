@@ -51,6 +51,12 @@ check_inputs() {
 
 report() {
   local pw; pw="$(cat "${CLUSTER_DIR}/kubeadmin-password" 2>/dev/null || echo '<unavailable>')"
+  local spares; compute_spares
+  if [[ ${#SPARE_NAME[@]} -gt 0 ]]; then
+    spares=" Spare workers     : $(printf '%s ' "${SPARE_HOST[@]}")(powered off; BMH paused — unpause to provision in a test)"
+  else
+    spares=" Spare workers     : none"
+  fi
   cat >&2 <<EOF
 
 $(printf '\033[1;32m')========================================================================
@@ -60,6 +66,7 @@ $(printf '\033[1;32m')==========================================================
  API     : https://$(api_fqdn):6443
  kubeadmin password : ${pw}
  kubeconfig         : ${KUBECONFIG_LOCAL}
+${spares}
 
  Use the cluster:
    export KUBECONFIG=${KUBECONFIG_LOCAL}

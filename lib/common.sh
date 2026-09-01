@@ -14,6 +14,11 @@
 : "${FEDORA_RELEASE:=44}"             # host AMI: Fedora Cloud Base release
 : "${CONTROL_PLANE_COUNT:=3}"
 : "${WORKER_COUNT:=3}"
+# Spare worker VMs: defined + BMC-configured but NOT installed with the cluster
+# (excluded from install/agent config, never booted during create). Kept
+# powered off with a paused BareMetalHost so a post-install test can provision
+# an extra node. Set to 0 to disable.
+: "${SPARE_WORKER_COUNT:=1}"
 : "${EC2_VOLUME_SIZE_GB:=1000}"
 
 # Per-node sizing
@@ -153,6 +158,26 @@ compute_nodes() {
     NODE_VCPU+=("$WK_VCPU"); NODE_RAM+=("$WK_RAM_GB")
   done
   RENDEZVOUS_IP="${NODE_IP[0]}"   # first master
+}
+
+# Spare worker topology (separate from compute_nodes so nothing that feeds the
+# install — install-config replicas, agent-config hosts, FAR node-params,
+# cluster-node BMHs — ever sees a spare). IPs/MACs continue the worker sequence
+# so they can't collide with cluster nodes.
+declare -a SPARE_NAME SPARE_HOST SPARE_ROLE SPARE_IP SPARE_MAC SPARE_VCPU SPARE_RAM
+compute_spares() {
+  SPARE_NAME=(); SPARE_HOST=(); SPARE_ROLE=(); SPARE_IP=(); SPARE_MAC=(); SPARE_VCPU=(); SPARE_RAM=()
+  local net3 i idx
+  net3="${NET_CIDR%.*}"
+  for ((i=0; i<SPARE_WORKER_COUNT; i++)); do
+    idx=$((WORKER_COUNT+i))   # continue after the installed workers
+    SPARE_NAME+=("${CLUSTER_NAME}-worker-spare-${i}")
+    SPARE_HOST+=("worker-spare-${i}")
+    SPARE_ROLE+=("worker")
+    SPARE_IP+=("${net3}.$((21+idx))")
+    SPARE_MAC+=("$(printf '52:54:00:6a:02:%02x' "$idx")")
+    SPARE_VCPU+=("$WK_VCPU"); SPARE_RAM+=("$WK_RAM_GB")
+  done
 }
 
 # Fully-qualified endpoints

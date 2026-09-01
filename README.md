@@ -45,6 +45,24 @@ export PULL_SECRET="$(cat ~/pull-secret.json)"
 ./rhwa-lab destroy    # tear everything down, including Route53 records
 ```
 
+### Spare worker (for post-install tests)
+
+`create` also defines `SPARE_WORKER_COUNT` (default **1**) extra worker VM(s)
+that are **not** part of the install: excluded from install-config/agent-config,
+never booted during `create`, and left powered off. Each gets its sushy-tools
+Redfish BMC plus a `BareMetalHost` in `openshift-machine-api` with its
+`bmc.address`/credentials set, created **paused**
+(`baremetalhost.metal3.io/paused`) so metal3 takes no action on it. To use one
+in a test, unpause it and provision it:
+
+```bash
+oc -n openshift-machine-api annotate bmh worker-spare-0 baremetalhost.metal3.io/paused-
+# then provision it (create a Machine / scale a MachineSet, etc.)
+```
+
+Set `SPARE_WORKER_COUNT=0` to disable. Spares still add ~4 vCPU each *only when
+powered on* by a test.
+
 `create` is resumable-ish: it records AWS resource IDs to `state/<cluster>.state`
 as it goes, so `destroy` always cleans up what was created even after a partial
 run. The agent ISO is built **exactly once** per lab (`agent_image_built` marker)

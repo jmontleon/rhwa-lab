@@ -2,15 +2,11 @@
 # vms.sh - define libvirt domains for the OpenShift nodes and run sushy-tools
 # (emulated Redfish BMC) in front of them.
 
-# Create the 6 domains (empty disks, UEFI, pinned MACs), NOT started yet.
-vms_define() {
-  compute_nodes
-  log "Defining ${#NODE_NAME[@]} libvirt domains"
-  local i name ram_mb
-  for i in "${!NODE_NAME[@]}"; do
-    name="${NODE_NAME[$i]}"
-    ram_mb=$(( NODE_RAM[i] * 1024 ))
-    ssh_host "sudo bash -s" <<EOS
+# Define one libvirt domain (empty disk, UEFI, pinned MAC), NOT started.
+#   $1=name  $2=ram_gb  $3=vcpu  $4=mac
+_vm_define_domain() {
+  local name="$1" ram_gb="$2" vcpu="$3" mac="$4" ram_mb=$(( $2 * 1024 ))
+  ssh_host "sudo bash -s" <<EOS
 set -e
 if virsh dominfo '${name}' >/dev/null 2>&1; then
   echo "domain ${name} exists, skipping"
@@ -20,32 +16,50 @@ else
   virt-install \
     --name '${name}' \
     --memory ${ram_mb} \
-    --vcpus ${NODE_VCPU[$i]} \
+    --vcpus ${vcpu} \
     --cpu host-passthrough \
     --os-variant rhel9.4 \
     --disk path=/var/lib/libvirt/images/${name}.qcow2,bus=virtio \
     --disk path=/var/lib/libvirt/images/${CLUSTER_NAME}-agent.iso,device=cdrom \
-    --network network=${LIBVIRT_NET},mac='${NODE_MAC[$i]}',model=virtio \
+    --network network=${LIBVIRT_NET},mac='${mac}',model=virtio \
     --boot uefi,hd,cdrom \
     --graphics none --noautoconsole --import --print-xml 1 > /tmp/${name}.xml
   virsh define /tmp/${name}.xml >/dev/null
 fi
 EOS
-    # ITERATE: the cdrom target dev name (sda vs hda) and interface name
-    # (enp1s0) inside RHCOS depend on machine type; verify on first boot.
+  # ITERATE: the cdrom target dev name (sda vs hda) and interface name
+  # (enp1s0) inside RHCOS depend on machine type; verify on first boot.
+}
+
+# Record a domain's UUID into state (sushy uses it as the Redfish System id).
+# Must use sudo: the domains live in qemu:///system (root); an unprivileged
+# `virsh` would query the empty qemu:///session. Trailing `|| true` keeps a
+# lookup failure from tripping set -e / pipefail.
+_vm_record_uuid() {
+  local name="$1" uuid
+  uuid="$(ssh_host "sudo virsh domuuid '${name}'" 2>/dev/null | tr -d '\r' | head -1 || true)"
+  [[ -n "$uuid" ]] || warn "could not read UUID for ${name} (fencing/BMC wiring will be incomplete)"
+  state_set "uuid_${name}" "$uuid"
+}
+
+# Create all domains (cluster nodes + any spare workers), NOT started yet.
+# Spares are defined and BMC-addressable but never booted here, so they take no
+# part in the install; a post-install test powers/provisions them.
+vms_define() {
+  compute_nodes; compute_spares
+  local total=$(( ${#NODE_NAME[@]} + ${#SPARE_NAME[@]} ))
+  log "Defining ${total} libvirt domains (${#SPARE_NAME[@]} spare, not booted during install)"
+  local i
+  for i in "${!NODE_NAME[@]}"; do
+    _vm_define_domain "${NODE_NAME[$i]}" "${NODE_RAM[$i]}" "${NODE_VCPU[$i]}" "${NODE_MAC[$i]}"
+  done
+  for i in "${!SPARE_NAME[@]}"; do
+    _vm_define_domain "${SPARE_NAME[$i]}" "${SPARE_RAM[$i]}" "${SPARE_VCPU[$i]}" "${SPARE_MAC[$i]}"
   done
   ok "Domains defined"
 
-  # Record UUIDs (sushy uses the domain UUID as the Redfish System id).
-  # Must use sudo: the domains live in qemu:///system (root), whereas an
-  # unprivileged `virsh` would query the empty qemu:///session. The trailing
-  # `|| true` keeps a lookup failure from tripping set -e / pipefail.
-  for i in "${!NODE_NAME[@]}"; do
-    local uuid
-    uuid="$(ssh_host "sudo virsh domuuid '${NODE_NAME[$i]}'" 2>/dev/null | tr -d '\r' | head -1 || true)"
-    [[ -n "$uuid" ]] || warn "could not read UUID for ${NODE_NAME[$i]} (fencing wiring will be incomplete)"
-    state_set "uuid_${NODE_NAME[$i]}" "$uuid"
-  done
+  for i in "${!NODE_NAME[@]}";  do _vm_record_uuid "${NODE_NAME[$i]}";  done
+  for i in "${!SPARE_NAME[@]}"; do _vm_record_uuid "${SPARE_NAME[$i]}"; done
 }
 
 # Boot all domains from the agent ISO (called after the ISO exists on host).
@@ -121,11 +135,10 @@ EOS
 }
 
 vms_teardown() {
-  compute_nodes
+  compute_nodes; compute_spares
   ssh_host 'sudo podman rm -f sushy >/dev/null 2>&1 || true' || true
-  local i name
-  for i in "${!NODE_NAME[@]}"; do
-    name="${NODE_NAME[$i]}"
+  local name
+  for name in "${NODE_NAME[@]}" "${SPARE_NAME[@]}"; do
     ssh_host "sudo bash -c '
       virsh destroy \"${name}\" 2>/dev/null || true
       virsh undefine \"${name}\" --nvram --remove-all-storage 2>/dev/null || true'" || true
