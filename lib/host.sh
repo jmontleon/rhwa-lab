@@ -72,8 +72,24 @@ EOC
   ok "haproxy forwarding 6443->${API_VIP}, 443/80->${INGRESS_VIP}"
 }
 
+# Ensure a libvirt storage pool literally named 'default' exists. sushy-tools'
+# InsertMedia stages virtual media into a pool named 'default'; if the only pool
+# is named something else (e.g. the AMI's 'images'), InsertMedia 500s with
+# "no storage pool with matching name 'default'". Idempotent.
+host_storage_pool() {
+  log "Ensuring libvirt storage pool 'default' (/var/lib/libvirt/images)"
+  ssh_host "sudo bash -c '
+    mkdir -p /var/lib/libvirt/images
+    virsh pool-info default >/dev/null 2>&1 || virsh pool-define-as default dir --target /var/lib/libvirt/images
+    virsh pool-autostart default 2>/dev/null || true
+    virsh pool-start default 2>/dev/null || true
+    virsh pool-refresh default 2>/dev/null || true'"
+  ok "Storage pool 'default' ready"
+}
+
 host_provision() {
   host_install_packages
+  host_storage_pool
   host_libvirt_network
   host_haproxy
 }
