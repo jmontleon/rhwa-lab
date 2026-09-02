@@ -130,6 +130,16 @@ ssh_node() {
   ssh "${_ssh_opts[@]}" -o "ProxyCommand=${jump}" "core@${ip}" "$@"
 }
 
+# Persist the values a test needs to reach the host's virsh/sushy out-of-band.
+# The SSH key is whatever the operator configured (SSH_PUBLIC_KEY_FILE); never
+# assume a default key name. Recorded so lib/power.sh and any exported test
+# config look it up instead of guessing.
+record_ssh_channel() {
+  state_set host_ip      "$(host_ip)"
+  state_set host_user    "${HOST_SSH_USER}"
+  state_set ssh_key_path "${PRIV_KEY}"
+}
+
 # ---------------------------------------------------------------------------
 # Node topology. Populates parallel arrays used across modules.
 #   NODE_NAME NODE_ROLE NODE_IP NODE_MAC NODE_VCPU NODE_RAM
