@@ -19,4 +19,7 @@ oc(){
 }
 os_provision_workers
 grep -q 'scale machineset t-abc-worker-0 --replicas=3' "$OUT" || { echo "FAIL scale args"; exit 1; }
+# After workers are Ready, the control plane is taken out of the schedulable pool
+grep -q 'patch schedulers.config.openshift.io/cluster' "$OUT" || { echo "FAIL missing mastersSchedulable patch"; exit 1; }
+grep -q '"mastersSchedulable":false' "$OUT" || { echo "FAIL mastersSchedulable not set false"; exit 1; }
 echo "PASS"

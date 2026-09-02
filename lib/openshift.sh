@@ -334,9 +334,27 @@ os_provision_workers() {
     # yields 0 (retry next poll) instead of aborting the whole run.
     ready="$( { oc get nodes -l 'node-role.kubernetes.io/worker=,!node-role.kubernetes.io/control-plane' --no-headers 2>/dev/null \
              | awk '$2=="Ready"' | wc -l; } || echo 0)"
-    if (( ready >= WORKER_COUNT )); then ok "${ready} worker nodes Ready"; return 0; fi
+    if (( ready >= WORKER_COUNT )); then
+      ok "${ready} worker nodes Ready"
+      os_unschedule_masters
+      return 0
+    fi
     sleep 30
   done
   warn "workers did not all reach Ready; check 'oc get bmh -n ${mapi}' and metal3 logs"
   return 1
+}
+
+# Take the control plane out of the schedulable pool once dedicated workers
+# exist. compute.replicas:0 makes the installer set mastersSchedulable:true, so
+# masters carry the worker role; with real workers up we want the standard
+# control-plane/worker split so test workloads (and the nodes tests fence) land
+# on workers, not masters. Only called after WORKER_COUNT workers are Ready, so
+# the cluster is never left with nothing schedulable.
+os_unschedule_masters() {
+  log "Removing worker role from masters (mastersSchedulable=false)"
+  oc patch schedulers.config.openshift.io/cluster --type=merge \
+    -p '{"spec":{"mastersSchedulable":false}}' >/dev/null 2>&1 \
+    && ok "Control plane set non-schedulable" \
+    || warn "could not set mastersSchedulable=false; masters keep the worker role"
 }
