@@ -326,9 +326,13 @@ os_provision_workers() {
   oc -n "$mapi" scale machineset "$ms" --replicas="${WORKER_COUNT}"
   log "Waiting for ${WORKER_COUNT} worker nodes to reach Ready (metal3 provisioning)"
   for ((i=0; i<120; i++)); do
+    # Count ONLY dedicated workers. With compute.replicas:0 the installer marks
+    # the control plane schedulable, so masters carry the worker role too; the
+    # `!control-plane` term excludes them, otherwise the 3 masters alone satisfy
+    # WORKER_COUNT and this returns instantly with zero real workers.
     # Non-fatal under `set -o pipefail`: a transient `oc get nodes` failure
     # yields 0 (retry next poll) instead of aborting the whole run.
-    ready="$( { oc get nodes -l node-role.kubernetes.io/worker='' --no-headers 2>/dev/null \
+    ready="$( { oc get nodes -l 'node-role.kubernetes.io/worker=,!node-role.kubernetes.io/control-plane' --no-headers 2>/dev/null \
              | awk '$2=="Ready"' | wc -l; } || echo 0)"
     if (( ready >= WORKER_COUNT )); then ok "${ready} worker nodes Ready"; return 0; fi
     sleep 30
