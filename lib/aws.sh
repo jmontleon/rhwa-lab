@@ -166,6 +166,20 @@ aws_launch_instance() {
   state_set eip "$eip"
   ok "Elastic IP ${eip} associated"
 
+  # The host reaches its own cluster via the public hostnames (api/*.apps ->
+  # this EIP), so its traffic hairpins out to the EIP and back through haproxy.
+  # aws_security_group() restricts those ports to the caller's IP, which locks
+  # the host out of its own cluster API during `openshift-install wait-for`
+  # (symptom: endless "Bootstrap Kube API never initialized" while the control
+  # plane is actually up). Allow the EIP itself on the forwarded ports.
+  local p
+  for p in 6443 443 80; do
+    aws ec2 authorize-security-group-ingress --group-id "$(state_get sg_id)" \
+      --ip-permissions "IpProtocol=tcp,FromPort=${p},ToPort=${p},IpRanges=[{CidrIp=${eip}/32}]" \
+      >/dev/null 2>&1 || true
+  done
+  ok "SG allows host hairpin: ${eip} -> 6443/443/80"
+
   log "Waiting for SSH on ${eip}..."
   retry 30 10 -- ssh_host true || die "SSH to host never came up."
   ok "Host reachable over SSH"
