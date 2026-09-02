@@ -2,10 +2,18 @@
 # vms.sh - define libvirt domains for the OpenShift nodes and run sushy-tools
 # (emulated Redfish BMC) in front of them.
 
-# Define one libvirt domain (empty disk, UEFI, pinned MAC), NOT started.
-#   $1=name  $2=ram_gb  $3=vcpu  $4=mac
+# Define one libvirt domain (empty root disk, UEFI, pinned MAC), NOT started.
+#   $1=name  $2=ram_gb  $3=vcpu  $4=mac  $5=role (master|worker)
+# masters boot the agent ISO (ABI); workers get an EMPTY cdrom so ironic can
+# insert virtual media at provision time (no agent ISO welded on).
 _vm_define_domain() {
-  local name="$1" ram_gb="$2" vcpu="$3" mac="$4" ram_mb=$(( $2 * 1024 ))
+  local name="$1" ram_gb="$2" vcpu="$3" mac="$4" role="$5" ram_mb=$(( $2 * 1024 ))
+  local cdrom
+  if [[ "$role" == "master" ]]; then
+    cdrom="--disk path=/var/lib/libvirt/images/${CLUSTER_NAME}-agent.iso,device=cdrom"
+  else
+    cdrom="--disk device=cdrom,bus=sata"   # empty tray for ironic virtual-media
+  fi
   ssh_host "sudo bash -s" <<EOS
 set -e
 if virsh dominfo '${name}' >/dev/null 2>&1; then
@@ -20,7 +28,7 @@ else
     --cpu host-passthrough \
     --os-variant rhel9.4 \
     --disk path=/var/lib/libvirt/images/${name}.qcow2,bus=virtio \
-    --disk path=/var/lib/libvirt/images/${CLUSTER_NAME}-agent.iso,device=cdrom \
+    ${cdrom} \
     --network network=${LIBVIRT_NET},mac='${mac}',model=virtio \
     --boot uefi,hd,cdrom \
     --graphics none --noautoconsole --import --print-xml 1 > /tmp/${name}.xml
@@ -51,10 +59,10 @@ vms_define() {
   log "Defining ${total} libvirt domains (${#SPARE_NAME[@]} spare, not booted during install)"
   local i
   for i in "${!NODE_NAME[@]}"; do
-    _vm_define_domain "${NODE_NAME[$i]}" "${NODE_RAM[$i]}" "${NODE_VCPU[$i]}" "${NODE_MAC[$i]}"
+    _vm_define_domain "${NODE_NAME[$i]}" "${NODE_RAM[$i]}" "${NODE_VCPU[$i]}" "${NODE_MAC[$i]}" "${NODE_ROLE[$i]}"
   done
   for i in "${!SPARE_NAME[@]}"; do
-    _vm_define_domain "${SPARE_NAME[$i]}" "${SPARE_RAM[$i]}" "${SPARE_VCPU[$i]}" "${SPARE_MAC[$i]}"
+    _vm_define_domain "${SPARE_NAME[$i]}" "${SPARE_RAM[$i]}" "${SPARE_VCPU[$i]}" "${SPARE_MAC[$i]}" "${SPARE_ROLE[$i]}"
   done
   ok "Domains defined"
 
