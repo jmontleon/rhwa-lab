@@ -326,8 +326,10 @@ os_provision_workers() {
   oc -n "$mapi" scale machineset "$ms" --replicas="${WORKER_COUNT}"
   log "Waiting for ${WORKER_COUNT} worker nodes to reach Ready (metal3 provisioning)"
   for ((i=0; i<120; i++)); do
-    ready="$(oc get nodes -l node-role.kubernetes.io/worker='' --no-headers 2>/dev/null \
-             | awk '$2=="Ready"' | wc -l)"
+    # Non-fatal under `set -o pipefail`: a transient `oc get nodes` failure
+    # yields 0 (retry next poll) instead of aborting the whole run.
+    ready="$( { oc get nodes -l node-role.kubernetes.io/worker='' --no-headers 2>/dev/null \
+             | awk '$2=="Ready"' | wc -l; } || echo 0)"
     if (( ready >= WORKER_COUNT )); then ok "${ready} worker nodes Ready"; return 0; fi
     sleep 30
   done

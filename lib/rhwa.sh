@@ -251,10 +251,33 @@ stringData:
   password: "${SUSHY_PASS}"
 EOF
       # Masters install via ABI and must NEVER be reprovisioned: add BMC only,
-      # leave externallyProvisioned / bootMACAddress untouched.
-      oc -n "$mapi" patch baremetalhost "$name" --type merge -p \
-        "{\"spec\":{\"online\":true,\"bmc\":{\"address\":\"${addr}\",\"credentialsName\":\"${secret}\",\"disableCertificateVerification\":true}}}"
-      ok "BMH ${name} (master): BMC set -> ${addr}"
+      # leave externallyProvisioned / bootMACAddress untouched. If the installer
+      # BMH is missing, self-heal by creating an externallyProvisioned:true
+      # master BMH (BMC + credentials ONLY) so ironic power-manages it without
+      # ever provisioning it -- never set bootMACAddress/rootDeviceHints/online
+      # provisioning fields on a master.
+      if oc -n "$mapi" get baremetalhost "$name" >/dev/null 2>&1; then
+        oc -n "$mapi" patch baremetalhost "$name" --type merge -p \
+          "{\"spec\":{\"online\":true,\"bmc\":{\"address\":\"${addr}\",\"credentialsName\":\"${secret}\",\"disableCertificateVerification\":true}}}"
+        ok "BMH ${name} (master): BMC set -> ${addr}"
+      else
+        warn "BareMetalHost ${name} (master) not found; creating an externally-provisioned one"
+        oc apply -f - <<EOF
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: ${name}
+  namespace: ${mapi}
+spec:
+  online: true
+  externallyProvisioned: true
+  bmc:
+    address: ${addr}
+    credentialsName: ${secret}
+    disableCertificateVerification: true
+EOF
+        ok "BMH ${name} (master): created externallyProvisioned -> ${addr}"
+      fi
     else
       _apply_worker_bmh "$name" "${NODE_MAC[$i]}" "$uuid"
     fi

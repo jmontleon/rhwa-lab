@@ -48,20 +48,45 @@ export PULL_SECRET="$(cat ~/pull-secret.json)"
 ### Spare worker (for post-install tests)
 
 `create` also defines `SPARE_WORKER_COUNT` (default **1**) extra worker VM(s)
-that are **not** part of the install: excluded from install-config/agent-config,
-never booted during `create`, and left powered off. Each gets its sushy-tools
-Redfish BMC plus a `BareMetalHost` in `openshift-machine-api` with its
-`bmc.address`/credentials set, created **paused**
-(`baremetalhost.metal3.io/paused`) so metal3 takes no action on it. To use one
-in a test, unpause it and provision it:
+that are **not** part of the install: excluded from install-config/agent-config
+and never booted during `create`. Each gets its sushy-tools Redfish BMC plus a
+provisionable, metal3-managed `BareMetalHost` in `openshift-machine-api`
+(`bmc.address`/credentials set, `rootDeviceHints: /dev/vda`, **not**
+externallyProvisioned) that metal3 inspects and leaves **`available`** — an
+unconsumed host ready to be provisioned. To use one in a test, scale the
+baremetal MachineSet up; metal3 consumes an `available` BMH and provisions it:
 
 ```bash
-oc -n openshift-machine-api annotate bmh worker-spare-0 baremetalhost.metal3.io/paused-
-# then provision it (create a Machine / scale a MachineSet, etc.)
+oc -n openshift-machine-api scale machineset <machineset> --replicas=<n>
+# metal3 picks up an available BMH and provisions it onto the new Machine
 ```
 
 Set `SPARE_WORKER_COUNT=0` to disable. Spares still add ~4 vCPU each *only when
-powered on* by a test.
+provisioned* by a test.
+
+### Reprovisionable workers
+
+Workers are born **metal3-managed and reprovisionable**: their BMHs are created
+provisionable (not externallyProvisioned) with `rootDeviceHints: /dev/vda` (the
+virtio root disk; metal3 defaults to `/dev/sda`, which is absent on virtio). The
+install brings up the control plane with `compute.replicas: 0`; `create` then
+scales the baremetal MachineSet up to `WORKER_COUNT`, and metal3 provisions the
+worker BMHs onto Machines. This means a test can delete a worker Machine (or use
+MDR) and have metal3 reprovision it. Masters are **never** reprovisioned — a
+master BMH stays `externallyProvisioned: true` with BMC only.
+
+### Out-of-band power control
+
+`./rhwa-lab power <on|off|reset> <node>` power-cycles a node's VM over an
+out-of-band channel (ssh → EC2 host → `virsh`), independent of the cluster API,
+so it survives quorum loss (e.g. powering off multiple control-plane nodes in a
+test). `<node>` is the node hostname.
+
+### VM definitions for the test suite
+
+`./rhwa-lab vms-definitions` prints `vms_definitions.json` (node → libvirt
+domain/host mapping) to stdout, which the test suite consumes to drive power
+control against the lab VMs.
 
 `create` is resumable-ish: it records AWS resource IDs to `state/<cluster>.state`
 as it goes, so `destroy` always cleans up what was created even after a partial
@@ -94,14 +119,18 @@ These are the spots most likely to need a fix on the first real run:
    (`node-healthcheck-operator`, `fence-agents-remediation`,
    `self-node-remediation`, `node-maintenance-operator`, channel `stable`).
 8. **BareMetalHost BMC wiring** — each node's BMH is populated with its
-   sushy-tools `bmc.address` (`redfish-virtualmedia://…`) + credentials Secret
-   and left **fully managed**, so metal3/ironic power-manages it in addition to
-   FAR. Both drive the same Redfish endpoint; if you see unexpected power
-   actions, this is the place to look (`spec.bmc` is set without flipping
-   `externallyProvisioned`, so ironic manages power but never re-provisions the
-   running node). The virtual-media driver needs UEFI + a cdrom (both present);
-   sushy keeps `IGNORE_BOOT_DEVICE=True` so a boot-device override can't divert
-   a fence reboot into the attached agent ISO.
+   sushy-tools `bmc.address` (`redfish-virtualmedia://…`) + credentials Secret,
+   so metal3/ironic power-manages it in addition to FAR. Both drive the same
+   Redfish endpoint; if you see unexpected power actions, this is the place to
+   look. Masters keep `externallyProvisioned: true` (BMC only — never
+   `bootMACAddress`/`rootDeviceHints`) so ironic power-manages but never
+   re-provisions the running control plane; workers/spares are born
+   provisionable (see "Reprovisionable workers" below). The virtual-media driver
+   needs UEFI + a cdrom (both present). `SUSHY_EMULATOR_IGNORE_BOOT_DEVICE=False`
+   is required so ironic's per-device boot override is honored during
+   provisioning. Fencing stays safe because existing nodes boot disk first (boot
+   order 1) and `fence_redfish` sends `ForceRestart` with **no** boot-device
+   override, so a fence reboot returns to disk, not to the attached media.
 6. **Host distro** — the EC2 host runs **Fedora Cloud Base** (owner
    `125523088429`, release `FEDORA_RELEASE`, default 44), which ships the full
    virtualization stack; AL2023 does not. Override the image with `HOST_AMI`

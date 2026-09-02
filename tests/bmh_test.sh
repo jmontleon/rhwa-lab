@@ -20,6 +20,23 @@ grep -q 'deviceName: /dev/vda' "$OUT" || { echo "FAIL vda hint"; exit 1; }
 grep -q 'externallyProvisioned: true' "$OUT" && { echo "FAIL worker must not be externallyProvisioned"; exit 1; }
 # spare worker gets a provisionable BMH too (available/unconsumed -> OCP-51155 scale-up)
 grep -q 'name: worker-spare-0' "$OUT" || { echo "FAIL spare BMH not created"; exit 1; }
+# existing master BMH is patched (merge), never recreated/reprovisioned
+grep -q 'patch baremetalhost master-' "$OUT" || { echo "FAIL master must be patched when present"; exit 1; }
+
 # spare function must be gone
 declare -F rhwa_configure_spare_bmh && { echo "FAIL spare fn still defined"; exit 1; }
+
+# --- master BMH absent: self-heal by creating an externallyProvisioned host ---
+OUT2="$(mktemp)"
+oc(){ printf '%s\n' "$*" >>"$OUT2"; cat >>"$OUT2" 2>/dev/null || true;
+      # every get baremetalhost misses -> exercise the create fallbacks
+      case "$*" in *"get baremetalhost "*) return 1;; esac; return 0; }
+rhwa_configure_bmh
+# master fallback creates an externallyProvisioned BMH...
+grep -q 'name: master-0' "$OUT2" || { echo "FAIL master BMH not created when absent"; exit 1; }
+grep -q 'externallyProvisioned: true' "$OUT2" || { echo "FAIL absent master must be externallyProvisioned"; exit 1; }
+# ...and must NEVER get bootMACAddress or rootDeviceHints (masters are not reprovisioned)
+awk '/^kind: BareMetalHost$/{blk=""} {blk=blk"\n"$0}
+     /^  name: master-/{ if (blk ~ /bootMACAddress/ || blk ~ /rootDeviceHints/) { print "HIT" } }' "$OUT2" \
+  | grep -q HIT && { echo "FAIL master BMH must not set bootMACAddress/rootDeviceHints"; exit 1; }
 echo "PASS"

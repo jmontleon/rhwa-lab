@@ -56,7 +56,7 @@ report() {
   local pw; pw="$(cat "${CLUSTER_DIR}/kubeadmin-password" 2>/dev/null || echo '<unavailable>')"
   local spares; compute_spares
   if [[ ${#SPARE_NAME[@]} -gt 0 ]]; then
-    spares=" Spare workers     : $(printf '%s ' "${SPARE_HOST[@]}")(powered off; BMH paused — unpause to provision in a test)"
+    spares=" Spare workers     : $(printf '%s ' "${SPARE_HOST[@]}")(extra available metal3-managed BMHs; provision on demand by scaling the MachineSet)"
   else
     spares=" Spare workers     : none"
   fi

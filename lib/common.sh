@@ -15,9 +15,10 @@
 : "${CONTROL_PLANE_COUNT:=3}"
 : "${WORKER_COUNT:=3}"
 # Spare worker VMs: defined + BMC-configured but NOT installed with the cluster
-# (excluded from install/agent config, never booted during create). Kept
-# powered off with a paused BareMetalHost so a post-install test can provision
-# an extra node. Set to 0 to disable.
+# (excluded from install/agent config, never booted during create). Each gets a
+# provisionable, metal3-managed BareMetalHost (rootDeviceHints /dev/vda) left
+# available/unconsumed so a post-install test can provision an extra node by
+# scaling the MachineSet onto it. Set to 0 to disable.
 : "${SPARE_WORKER_COUNT:=1}"
 : "${EC2_VOLUME_SIZE_GB:=1000}"
 
