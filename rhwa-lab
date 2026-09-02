@@ -102,6 +102,8 @@ cmd_create() {
   os_local_oc
   os_wait_cluster_ready
   rhwa_setup
+  os_provision_workers
+  record_ssh_channel
   _RHWA_IN_CREATE=
   ok "Create complete"
   report

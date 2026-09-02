@@ -313,3 +313,24 @@ os_wait_cluster_ready() {
   done
   warn "Cluster did not report Available in time; check 'oc get co'."
 }
+
+# Provision the metal3-managed workers post-install: scale the baremetal
+# MachineSet up to WORKER_COUNT (consuming the provisionable worker BMHs) and
+# wait for that many worker Nodes to be Ready. Scale is used ONLY to add
+# workers; targeted removal in tests must delete a specific Machine instead.
+os_provision_workers() {
+  local mapi="openshift-machine-api" ms i ready
+  ms="$(oc -n "$mapi" get machineset -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+  [[ -n "$ms" ]] || die "no baremetal MachineSet found; cannot provision workers"
+  log "Scaling MachineSet ${ms} to ${WORKER_COUNT} workers"
+  oc -n "$mapi" scale machineset "$ms" --replicas="${WORKER_COUNT}"
+  log "Waiting for ${WORKER_COUNT} worker nodes to reach Ready (metal3 provisioning)"
+  for ((i=0; i<120; i++)); do
+    ready="$(oc get nodes -l node-role.kubernetes.io/worker='' --no-headers 2>/dev/null \
+             | awk '$2=="Ready"' | wc -l)"
+    if (( ready >= WORKER_COUNT )); then ok "${ready} worker nodes Ready"; return 0; fi
+    sleep 30
+  done
+  warn "workers did not all reach Ready; check 'oc get bmh -n ${mapi}' and metal3 logs"
+  return 1
+}
