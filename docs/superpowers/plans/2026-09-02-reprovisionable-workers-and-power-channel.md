@@ -47,12 +47,14 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${DIR}/lib.sh"
 
-# Arrange: fake state + config
+# Arrange: fake state + config. common.sh defines host_ip()=`state_get eip`, so
+# seed eip in the fake state and define the state stubs AFTER sourcing common.sh
+# (otherwise common.sh's host_ip would shadow a stub and record "").
 export CLUSTER_NAME=t HOST_SSH_USER=fedora
 export SSH_PUBLIC_KEY_FILE=/tmp/somekey.pub          # private => /tmp/somekey
-declare -A _STATE=(); state_set(){ _STATE["$1"]="$2"; }; state_get(){ echo "${_STATE[$1]:-}"; }
-host_ip(){ echo "203.0.113.9"; }
-source "${DIR}/../lib/common.sh" 2>/dev/null || true  # for PRIV_KEY derivation
+source "${DIR}/../lib/common.sh" 2>/dev/null || true  # defines host_ip + record_ssh_channel
+declare -A _STATE=([eip]=203.0.113.9)
+state_set(){ _STATE["$1"]="$2"; }; state_get(){ echo "${_STATE[$1]:-}"; }
 PRIV_KEY="${SSH_PUBLIC_KEY_FILE%.pub}"
 
 record_ssh_channel
@@ -598,6 +600,8 @@ rhwa_configure_bmh
 # worker BMH created with vda hint and NOT externallyProvisioned
 grep -q 'deviceName: /dev/vda' "$OUT" || { echo "FAIL vda hint"; exit 1; }
 grep -q 'externallyProvisioned: true' "$OUT" && { echo "FAIL worker must not be externallyProvisioned"; exit 1; }
+# spare worker gets a provisionable BMH too (available/unconsumed -> OCP-51155 scale-up)
+grep -q 'name: worker-spare-0' "$OUT" || { echo "FAIL spare BMH not created"; exit 1; }
 # spare function must be gone
 declare -F rhwa_configure_spare_bmh && { echo "FAIL spare fn still defined"; exit 1; }
 echo "PASS"
@@ -610,22 +614,58 @@ Expected: FAIL — no `/dev/vda` hint; `rhwa_configure_spare_bmh` still defined.
 
 - [ ] **Step 3: Rewrite `rhwa_configure_bmh` in `lib/rhwa.sh`** — branch on role
 
-Replace the per-node body so masters get the existing patch-only path and workers get a provisionable BMH:
+Add a shared helper for provisionable worker BMHs (used by both cluster workers and spares — DRY), then branch on role. Masters get the existing patch-only path:
 
 ```bash
+# Emit a provisionable worker BMH (+ its BMC secret). Shared by cluster workers
+# and spares: NOT externallyProvisioned; rootDeviceHints pins the virtio root
+# disk (/dev/vda — metal3 defaults to /dev/sda, which is absent on virtio).
+_apply_worker_bmh() {
+  local name="$1" mac="$2" uuid="$3" mapi="openshift-machine-api"
+  local addr="redfish-virtualmedia://${NET_GATEWAY}:${SUSHY_PORT}/redfish/v1/Systems/${uuid}"
+  local secret="${name}-bmc-secret"
+  oc apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${secret}
+  namespace: ${mapi}
+type: Opaque
+stringData:
+  username: "${SUSHY_USER}"
+  password: "${SUSHY_PASS}"
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: ${name}
+  namespace: ${mapi}
+spec:
+  online: true
+  bootMACAddress: ${mac}
+  rootDeviceHints:
+    deviceName: /dev/vda
+  bmc:
+    address: ${addr}
+    credentialsName: ${secret}
+    disableCertificateVerification: true
+EOF
+  ok "BMH ${name} (worker): provisionable -> ${addr}"
+}
+
 rhwa_configure_bmh() {
-  compute_nodes
+  compute_nodes; compute_spares
   local mapi="openshift-machine-api"
-  log "Configuring BareMetalHost BMC (+ provisionable workers) for each node"
+  log "Configuring BareMetalHost BMC (+ provisionable workers/spares)"
   local i name role uuid addr secret
   for i in "${!NODE_HOST[@]}"; do
     name="${NODE_HOST[$i]}"; role="${NODE_ROLE[$i]}"
     uuid="$(state_get "uuid_${NODE_NAME[$i]}")"
     if [[ -z "$uuid" ]]; then warn "no libvirt UUID for ${name}; skipping"; continue; fi
-    addr="redfish-virtualmedia://${NET_GATEWAY}:${SUSHY_PORT}/redfish/v1/Systems/${uuid}"
-    secret="${name}-bmc-secret"
-
-    oc apply -f - <<EOF
+    if [[ "$role" == "master" ]]; then
+      addr="redfish-virtualmedia://${NET_GATEWAY}:${SUSHY_PORT}/redfish/v1/Systems/${uuid}"
+      secret="${name}-bmc-secret"
+      oc apply -f - <<EOF
 apiVersion: v1
 kind: Secret
 metadata:
@@ -636,35 +676,21 @@ stringData:
   username: "${SUSHY_USER}"
   password: "${SUSHY_PASS}"
 EOF
-
-    if [[ "$role" == "master" ]]; then
       # Masters install via ABI and must NEVER be reprovisioned: add BMC only,
       # leave externallyProvisioned / bootMACAddress untouched.
       oc -n "$mapi" patch baremetalhost "$name" --type merge -p \
         "{\"spec\":{\"online\":true,\"bmc\":{\"address\":\"${addr}\",\"credentialsName\":\"${secret}\",\"disableCertificateVerification\":true}}}"
       ok "BMH ${name} (master): BMC set -> ${addr}"
     else
-      # Workers are metal3-managed and reprovisionable: create a provisionable
-      # BMH (NOT externallyProvisioned). rootDeviceHints pins the virtio root
-      # disk (/dev/vda); metal3 otherwise defaults to /dev/sda which is absent.
-      oc apply -f - <<EOF
-apiVersion: metal3.io/v1alpha1
-kind: BareMetalHost
-metadata:
-  name: ${name}
-  namespace: ${mapi}
-spec:
-  online: true
-  bootMACAddress: ${NODE_MAC[$i]}
-  rootDeviceHints:
-    deviceName: /dev/vda
-  bmc:
-    address: ${addr}
-    credentialsName: ${secret}
-    disableCertificateVerification: true
-EOF
-      ok "BMH ${name} (worker): provisionable -> ${addr}"
+      _apply_worker_bmh "$name" "${NODE_MAC[$i]}" "$uuid"
     fi
+  done
+  # Spare workers: provisionable BMHs left available (unconsumed) so a scale-up
+  # test (OCP-51155) can grow the MachineSet onto them.
+  for i in "${!SPARE_HOST[@]}"; do
+    uuid="$(state_get "uuid_${SPARE_NAME[$i]}")"
+    if [[ -z "$uuid" ]]; then warn "no libvirt UUID for spare ${SPARE_HOST[$i]}; skipping"; continue; fi
+    _apply_worker_bmh "${SPARE_HOST[$i]}" "${SPARE_MAC[$i]}" "$uuid"
   done
 }
 ```
@@ -681,7 +707,7 @@ rhwa_setup() {
 }
 ```
 
-> Note: extra "spare" BMHs beyond WORKER_COUNT are still defined as domains (Task 4) and get provisionable BMHs the same way — extend the `rhwa_configure_bmh` loop over `SPARE_*` in Task 7 if `SPARE_WORKER_COUNT>0` is desired as available-but-unconsumed hosts. For MVP, WORKER_COUNT workers are provisioned; scale-up consumes a spare defined identically.
+> Note: `rhwa_configure_bmh` (Step 3) now also loops over `SPARE_*` (via `compute_spares`) and gives each spare an identical provisionable BMH via `_apply_worker_bmh`. Spares are left `available`/unconsumed (no Machine references them) so a scale-up test (OCP-51155) grows the MachineSet onto a spare with zero extra setup. `SPARE_WORKER_COUNT` still means "how many extra available BMHs beyond WORKER_COUNT."
 
 - [ ] **Step 5: Run test to verify it passes**
 
