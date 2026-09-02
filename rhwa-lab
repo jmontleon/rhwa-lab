@@ -10,6 +10,7 @@
 #   ./rhwa-lab install-config  Print a sanitized install-config.yaml (no secrets)
 #   ./rhwa-lab allow [IP]  Allow another IP (or 'all') through the firewall
 #   ./rhwa-lab power <on|off|reset> <node>  Out-of-band power via ssh->virsh
+#   ./rhwa-lab vms-definitions   Print node->domain/host JSON for test power control
 #   ./rhwa-lab destroy    Tear everything down (incl. Route53 records)
 #   ./rhwa-lab help       Show this help
 #
@@ -163,6 +164,8 @@ cmd_power() {
   node_power "$action" "$node"
 }
 
+cmd_vms_definitions() { state_init; emit_vms_definitions; }
+
 cmd_destroy() {
   require_cmds aws
   state_init
@@ -213,6 +216,7 @@ main() {
     install-config) cmd_install_config "$@" ;;
     allow)   cmd_allow   "$@" ;;
     power)   cmd_power   "$@" ;;
+    vms-definitions) cmd_vms_definitions "$@" ;;
     destroy) cmd_destroy "$@" ;;
     status)  cmd_status  "$@" ;;
     help|-h|--help) usage ;;

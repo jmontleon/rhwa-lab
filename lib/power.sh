@@ -21,3 +21,22 @@ node_power() {
   ssh_host "sudo virsh ${verb} '${domain}'"
   ok "Power ${action} issued for ${host}"
 }
+
+# Emit a JSON descriptor tests use to reach nodes' power OOB. The SSH key path
+# is the operator-configured key recorded in state — never a presumed default.
+emit_vms_definitions() {
+  compute_nodes
+  local i nodes="" comma=""
+  for i in "${!NODE_NAME[@]}"; do
+    nodes+="${comma}$(jq -n \
+      --arg name "${NODE_NAME[$i]}" --arg host "${NODE_HOST[$i]}" \
+      --arg domain "${NODE_NAME[$i]}" --arg uuid "$(state_get "uuid_${NODE_NAME[$i]}")" \
+      --arg ip "${NODE_IP[$i]}" --arg mac "${NODE_MAC[$i]}" --arg role "${NODE_ROLE[$i]}" \
+      '{name:$name,host:$host,domain:$domain,uuid:$uuid,ip:$ip,mac:$mac,role:$role}')"
+    comma=","
+  done
+  jq -n \
+    --arg ip "$(state_get host_ip)" --arg user "$(state_get host_user)" \
+    --arg key "$(state_get ssh_key_path)" --argjson nodes "[${nodes}]" \
+    '{host:{ip:$ip,user:$user,ssh_key_path:$key},nodes:$nodes}'
+}
