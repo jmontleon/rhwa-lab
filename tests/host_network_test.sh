@@ -16,7 +16,7 @@ assert_contains "$STUB_OUT" "range start='192.168.126.100'"
 # master-0 reservation (52:54:00:6a:01:00 -> .11)
 assert_contains "$STUB_OUT" "52:54:00:6a:01:00"
 assert_contains "$STUB_OUT" "192.168.126.11"
-# spare-0 reservation (idx=3 -> .24, mac ...:02:03)
+# first spare = worker-3 reservation (idx=3 -> .24, mac ...:02:03)
 assert_contains "$STUB_OUT" "52:54:00:6a:02:03"
 assert_contains "$STUB_OUT" "192.168.126.24"
 echo "PASS"

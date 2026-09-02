@@ -19,7 +19,7 @@
 # provisionable, metal3-managed BareMetalHost (rootDeviceHints /dev/vda) left
 # available/unconsumed so a post-install test can provision an extra node by
 # scaling the MachineSet onto it. Set to 0 to disable.
-: "${SPARE_WORKER_COUNT:=1}"
+: "${SPARE_WORKER_COUNT:=3}"
 : "${EC2_VOLUME_SIZE_GB:=1000}"
 
 # Per-node sizing
@@ -173,8 +173,11 @@ compute_nodes() {
 
 # Spare worker topology (separate from compute_nodes so nothing that feeds the
 # install — install-config replicas, agent-config hosts, FAR node-params,
-# cluster-node BMHs — ever sees a spare). IPs/MACs continue the worker sequence
-# so they can't collide with cluster nodes.
+# cluster-node BMHs — ever sees a spare). Names/IPs/MACs continue the worker
+# sequence (worker-<WORKER_COUNT>, worker-<WORKER_COUNT+1>, ...) so spares are
+# indistinguishable from installed workers except that they live in these arrays
+# and are left as unconsumed available BMHs; the numbering can't collide with
+# cluster nodes. "Spare" is a role in the topology, not a name prefix.
 declare -a SPARE_NAME SPARE_HOST SPARE_ROLE SPARE_IP SPARE_MAC SPARE_VCPU SPARE_RAM
 compute_spares() {
   SPARE_NAME=(); SPARE_HOST=(); SPARE_ROLE=(); SPARE_IP=(); SPARE_MAC=(); SPARE_VCPU=(); SPARE_RAM=()
@@ -182,8 +185,8 @@ compute_spares() {
   net3="${NET_CIDR%.*}"
   for ((i=0; i<SPARE_WORKER_COUNT; i++)); do
     idx=$((WORKER_COUNT+i))   # continue after the installed workers
-    SPARE_NAME+=("${CLUSTER_NAME}-worker-spare-${i}")
-    SPARE_HOST+=("worker-spare-${i}")
+    SPARE_NAME+=("${CLUSTER_NAME}-worker-${idx}")
+    SPARE_HOST+=("worker-${idx}")
     SPARE_ROLE+=("worker")
     SPARE_IP+=("${net3}.$((21+idx))")
     SPARE_MAC+=("$(printf '52:54:00:6a:02:%02x' "$idx")")

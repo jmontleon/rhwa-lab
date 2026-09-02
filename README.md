@@ -45,11 +45,14 @@ export PULL_SECRET="$(cat ~/pull-secret.json)"
 ./rhwa-lab destroy    # tear everything down, including Route53 records
 ```
 
-### Spare worker (for post-install tests)
+### Spare workers (for post-install tests)
 
-`create` also defines `SPARE_WORKER_COUNT` (default **1**) extra worker VM(s)
+`create` also defines `SPARE_WORKER_COUNT` (default **3**) extra worker VM(s)
 that are **not** part of the install: excluded from install-config/agent-config
-and never booted during `create`. Each gets its sushy-tools Redfish BMC plus a
+and never booted during `create`. They continue the worker numbering (with
+`WORKER_COUNT=3` the spares are `worker-3`, `worker-4`, `worker-5`) — there is no
+`-spare-` name prefix; "spare" just means an unconsumed `available` host. Each
+gets its sushy-tools Redfish BMC plus a
 provisionable, metal3-managed `BareMetalHost` in `openshift-machine-api`
 (`bmc.address`/credentials set, `rootDeviceHints: /dev/vda`, **not**
 externallyProvisioned) that metal3 inspects and leaves **`available`** — an

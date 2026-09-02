@@ -18,8 +18,10 @@ rhwa_configure_bmh
 # worker BMH created with vda hint and NOT externallyProvisioned
 grep -q 'deviceName: /dev/vda' "$OUT" || { echo "FAIL vda hint"; exit 1; }
 grep -q 'externallyProvisioned: true' "$OUT" && { echo "FAIL worker must not be externallyProvisioned"; exit 1; }
-# spare worker gets a provisionable BMH too (available/unconsumed -> OCP-51155 scale-up)
-grep -q 'name: worker-spare-0' "$OUT" || { echo "FAIL spare BMH not created"; exit 1; }
+# spare worker gets a provisionable BMH too (available/unconsumed -> OCP-51155
+# scale-up). Spares continue the worker numbering: with WORKER_COUNT=3 the first
+# spare is worker-3 (no "-spare-" name prefix).
+grep -q 'name: worker-3' "$OUT" || { echo "FAIL spare BMH not created"; exit 1; }
 # existing master BMH is patched (merge), never recreated/reprovisioned
 grep -q 'patch baremetalhost master-' "$OUT" || { echo "FAIL master must be patched when present"; exit 1; }
 
