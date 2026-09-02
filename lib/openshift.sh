@@ -62,9 +62,10 @@ networking:
     hostPrefix: 23
   serviceNetwork:
   - 172.30.0.0/16
+# Workers are provisioned post-install by a MachineSet via metal3 (Approach A1).
 compute:
 - name: worker
-  replicas: ${WORKER_COUNT}
+  replicas: 0
 controlPlane:
   name: master
   replicas: ${CONTROL_PLANE_COUNT}
@@ -108,6 +109,7 @@ hosts:
 EOF
     local i
     for i in "${!NODE_NAME[@]}"; do
+      [[ "${NODE_ROLE[$i]}" == "master" ]] || continue   # workers join via MachineSet, not ABI rendezvous
       cat <<EOF
 - hostname: ${NODE_HOST[$i]}
   role: ${NODE_ROLE[$i]}
