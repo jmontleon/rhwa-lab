@@ -21,22 +21,34 @@ EOS
 
 host_libvirt_network() {
   log "Defining libvirt network ${LIBVIRT_NET} (${NET_CIDR})"
-  local net3="${NET_CIDR%.*}"
+  compute_nodes; compute_spares
+  local net3="${NET_CIDR%.*}" reservations="" i
+  for i in "${!NODE_MAC[@]}"; do
+    reservations+="      <host mac='${NODE_MAC[$i]}' name='${NODE_HOST[$i]}' ip='${NODE_IP[$i]}'/>"$'\n'
+  done
+  for i in "${!SPARE_MAC[@]}"; do
+    reservations+="      <host mac='${SPARE_MAC[$i]}' name='${SPARE_HOST[$i]}' ip='${SPARE_IP[$i]}'/>"$'\n'
+  done
   ssh_host "cat > /tmp/${LIBVIRT_NET}.xml" <<EOX
 <network>
   <name>${LIBVIRT_NET}</name>
   <forward mode='nat'/>
   <bridge name='virbr-rhwa' stp='on' delay='0'/>
   <ip address='${NET_GATEWAY}' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='${net3}.100' end='${net3}.199'/>
+${reservations}    </dhcp>
   </ip>
 </network>
 EOX
-  # No DHCP range: nodes get static IPs from agent-config nmstate.
+  # DHCP range is required so a metal3-provisioned worker's generic IPA ramdisk
+  # gets an address; static reservations pin each node/spare to its known IP so
+  # DHCP and the masters' agent-config nmstate agree.
   ssh_host "sudo bash -c '
     virsh net-info ${LIBVIRT_NET} >/dev/null 2>&1 || virsh net-define /tmp/${LIBVIRT_NET}.xml
     virsh net-autostart ${LIBVIRT_NET} 2>/dev/null || true
     virsh net-start ${LIBVIRT_NET} 2>/dev/null || true'"
-  ok "libvirt network ready (gateway/host bridge IP ${NET_GATEWAY})"
+  ok "libvirt network ready (gateway/host bridge IP ${NET_GATEWAY}, DHCP + reservations)"
 }
 
 host_haproxy() {
