@@ -9,6 +9,7 @@
 #   node-host is e.g. master-0 / worker-1; the libvirt domain is
 #   ${CLUSTER_NAME}-<node-host>.
 node_power() {
+  [[ -n "${1:-}" && -n "${2:-}" ]] || die "node_power: usage: node_power <on|off|reset> <node>"
   local action="$1" host="$2" domain="${CLUSTER_NAME}-$2" verb
   case "$action" in
     on)    verb="start" ;;
@@ -17,6 +18,6 @@ node_power() {
     *) die "node_power: unknown action '$action' (use on|off|reset)" ;;
   esac
   log "Power ${action} ${host} (virsh ${verb} ${domain})"
-  ssh_host "sudo virsh ${verb} ${domain}"
+  ssh_host "sudo virsh ${verb} '${domain}'"
   ok "Power ${action} issued for ${host}"
 }
