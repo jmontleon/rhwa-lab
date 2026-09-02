@@ -84,6 +84,18 @@ spec:
   source: redhat-operators
   sourceNamespace: openshift-marketplace
   installPlanApproval: Automatic
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: machine-deletion-remediation
+  namespace: ${RHWA_NAMESPACE}
+spec:
+  channel: ${RHWA_CHANNEL}
+  name: machine-deletion-remediation
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
 EOF
   # Non-fatal: warn and continue so `test` can surface any real problem.
   _wait_csv "node-healthcheck-operator" || true
@@ -91,6 +103,9 @@ EOF
   _wait_csv "self-node-remediation" || true
   # NMO has no singleton config/DaemonSet; it just watches NodeMaintenance CRs.
   _wait_csv "node-maintenance-operator" || true
+  # MDR reprovisions unhealthy nodes via the Machine API; test_mdr_cli.py brings
+  # its own MDRT/MDR/NHC CRs, so only the operator install is needed here.
+  _wait_csv "machine-deletion-remediation" || true
   # SNR auto-creates a default SelfNodeRemediationConfig on startup; confirm it
   # appears so consumers (and SNR test suites) find it configured.
   _wait_snr_config || true
