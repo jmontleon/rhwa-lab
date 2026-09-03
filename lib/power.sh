@@ -24,16 +24,30 @@ node_power() {
 
 # Emit a JSON descriptor tests use to reach nodes' power OOB. The SSH key path
 # is the operator-configured key recorded in state — never a presumed default.
+#
+# Both installed cluster nodes AND spare workers are emitted. The test suite
+# treats this descriptor as the single source of truth for worker capacity
+# (get_num_of_provisioned_workers counts role=="worker" entries), so the
+# unconsumed available BMHs must appear here for the OCP-51155 scale-up guard
+# to see capacity > running workers. No test power-targets a spare, but mapping
+# them costs nothing and keeps count and power views consistent.
 emit_vms_definitions() {
   compute_nodes
+  compute_spares
   local i nodes="" comma=""
-  for i in "${!NODE_NAME[@]}"; do
+  _emit_node() {   # <name> <host> <ip> <mac> <role>
     nodes+="${comma}$(jq -n \
-      --arg name "${NODE_NAME[$i]}" --arg host "${NODE_HOST[$i]}" \
-      --arg domain "${NODE_NAME[$i]}" --arg uuid "$(state_get "uuid_${NODE_NAME[$i]}")" \
-      --arg ip "${NODE_IP[$i]}" --arg mac "${NODE_MAC[$i]}" --arg role "${NODE_ROLE[$i]}" \
+      --arg name "$1" --arg host "$2" \
+      --arg domain "$1" --arg uuid "$(state_get "uuid_$1")" \
+      --arg ip "$3" --arg mac "$4" --arg role "$5" \
       '{name:$name,host:$host,domain:$domain,uuid:$uuid,ip:$ip,mac:$mac,role:$role}')"
     comma=","
+  }
+  for i in "${!NODE_NAME[@]}"; do
+    _emit_node "${NODE_NAME[$i]}" "${NODE_HOST[$i]}" "${NODE_IP[$i]}" "${NODE_MAC[$i]}" "${NODE_ROLE[$i]}"
+  done
+  for i in "${!SPARE_NAME[@]}"; do
+    _emit_node "${SPARE_NAME[$i]}" "${SPARE_HOST[$i]}" "${SPARE_IP[$i]}" "${SPARE_MAC[$i]}" "${SPARE_ROLE[$i]}"
   done
   jq -n \
     --arg ip "$(state_get host_ip)" --arg user "$(state_get host_user)" \
