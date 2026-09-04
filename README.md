@@ -28,21 +28,25 @@ registry entitlement.
 
 ```bash
 # All inputs come from environment variables (no config/secrets file).
-export AWS_ACCESS_KEY_ID=...   AWS_SECRET_ACCESS_KEY=...   AWS_REGION=us-east-2
-export PULL_SECRET="$(cat ~/pull-secret.json)"
-# optional: ROUTE53_ZONE_ID accepts a zone id (Z...) OR a domain name; if unset
-# it is resolved from BASE_DOMAIN (default migration.redhat.com).
-# export ROUTE53_ZONE_ID=migration.redhat.com
-# optional: point at a non-default SSH key (private key is the same path w/o .pub)
-# export SSH_PUBLIC_KEY_FILE=$HOME/.ssh/id_ed25519.pub
-# other optional overrides: CLUSTER_NAME, INSTANCE_TYPE, OCP_VERSION ...
+export ROUTE53_ZONE_ID=
+export CLUSTER_NAME=
+export SSH_PUBLIC_KEY_FILE=
+export PULL_SECRET=
+export AWS_REGION=
+export AWS_ACCESS_KEY_ID=
+export AWS_SECRET_ACCESS_KEY=
 
-./rhwa-lab create     # provision AWS host, VMs, Redfish, OpenShift, RHWA (~1.5-2.5h)
-./rhwa-lab monitor    # live, phase-aware install progress (safe to run any time)
-./rhwa-lab status     # show endpoints, credentials, uptime
-./rhwa-lab test       # trigger and verify a fence_redfish remediation
-./rhwa-lab install-config > install-config.yaml  # sanitized config (no pull secret or SSH key)
-./rhwa-lab destroy    # tear everything down, including Route53 records
+Usage:
+  ./rhwa-lab create     Provision everything end-to-end
+  ./rhwa-lab monitor    Live, phase-aware install progress (safe any time)
+  ./rhwa-lab test       Trigger + verify a fence_redfish remediation
+  ./rhwa-lab status     Show endpoints, credentials, uptime
+  ./rhwa-lab install-config  Print a sanitized install-config.yaml (no secrets)
+  ./rhwa-lab allow [IP]  Allow another IP (or 'all') through the firewall
+  ./rhwa-lab power <on|off|reset> <node>  Out-of-band power via ssh->virsh
+  ./rhwa-lab vms-definitions   Print node->domain/host JSON for test power control
+  ./rhwa-lab destroy    Tear everything down (incl. Route53 records)
+  ./rhwa-lab help       Show this help
 ```
 
 ### Spare workers (for post-install tests)
