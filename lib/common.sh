@@ -7,7 +7,7 @@
 # ---------------------------------------------------------------------------
 : "${CLUSTER_NAME:=rhwa-lab}"
 : "${BASE_DOMAIN:=migration.redhat.com}"
-: "${OCP_VERSION:=stable-4.22}"
+: "${OCP_VERSION:=5.0.0-rc.1}"
 : "${INSTANCE_TYPE:=m8i.12xlarge}"
 : "${SSH_PUBLIC_KEY_FILE:=$HOME/.ssh/id_rsa.pub}"
 : "${HOST_SSH_USER:=fedora}"          # default cloud user of the host AMI (Fedora)
