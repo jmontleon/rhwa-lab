@@ -20,7 +20,6 @@
 # available/unconsumed so a post-install test can provision an extra node by
 # scaling the MachineSet onto it. Set to 0 to disable.
 : "${SPARE_WORKER_COUNT:=3}"
-: "${EC2_VOLUME_SIZE_GB:=1000}"
 
 # Per-node sizing
 : "${CP_VCPU:=8}"
@@ -42,6 +41,83 @@
 # RHWA
 : "${RHWA_NAMESPACE:=openshift-workload-availability}"
 : "${RHWA_CHANNEL:=stable}"
+
+# ---------------------------------------------------------------------------
+# ODF (OpenShift Data Foundation) in EXTERNAL mode, backed by a single-host
+# Ceph cluster running on its own libvirt VM with 3 extra disks (one OSD each).
+# Set ODF_ENABLED=false to skip the whole feature (no ceph VM, no ODF operator).
+# ---------------------------------------------------------------------------
+: "${ODF_ENABLED:=true}"
+: "${ODF_NAMESPACE:=openshift-storage}"
+# ODF operator channel must track the cluster's OCP minor in the redhat-operators
+# catalog. Derived from OCP_VERSION (stable-4.NN -> stable-4.NN) when unset.
+if [[ "${OCP_VERSION}" =~ ^[a-z]+-([0-9]+\.[0-9]+)$ ]]; then
+  _odf_minor="${BASH_REMATCH[1]}"
+else
+  _odf_minor="4.22"
+fi
+: "${ODF_CHANNEL:=stable-${_odf_minor}}"   # ITERATE: confirm this channel exists in the catalog for your OCP version
+
+# External Ceph cluster (single VM, cephadm --single-host-defaults).
+: "${CEPH_ENABLED:=${ODF_ENABLED}}"        # ceph VM follows ODF_ENABLED unless overridden
+# Ceph release train. Drives BOTH the CentOS Storage SIG package that installs
+# cephadm (centos-release-ceph-<release>, in extras-common) AND the container
+# image the cluster runs -- so the cephadm binary and the running ceph are the
+# SAME release. (The release-agnostic 'centos-release-ceph-umbrella' package
+# hands you a *development* cephadm whose default image is a dev/tip ceph, whose
+# 'ceph mgr dump' JSON is ahead of ODF's rook -> "cannot unmarshal ...
+# mgr.map.standbys".) ITERATE: match to the ceph version your ODF release
+# supports (reef, squid, ...).
+: "${CEPH_RELEASE:=squid}"
+case "${CEPH_RELEASE}" in
+  pacific)  _ceph_img_tag=v16 ;;
+  quincy)   _ceph_img_tag=v17 ;;
+  reef)     _ceph_img_tag=v18 ;;
+  squid)    _ceph_img_tag=v19 ;;
+  tentacle) _ceph_img_tag=v20 ;;
+  *)        _ceph_img_tag="" ;;   # unknown -> let the release-matched cephadm pick its default
+esac
+# Container image the cluster runs, derived from the release so it matches the
+# cephadm binary. Override CEPH_IMAGE only for a mirror/air-gapped registry.
+: "${CEPH_IMAGE:=${_ceph_img_tag:+quay.io/ceph/ceph:${_ceph_img_tag}}}"
+: "${CEPH_CLOUD_IMAGE_URL:=https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2}"
+: "${CEPH_SSH_USER:=cloud-user}"           # default user of the ceph VM's cloud image (CentOS Stream = cloud-user)
+: "${CEPH_VCPU:=4}"
+: "${CEPH_RAM_GB:=16}"
+: "${CEPH_ROOT_DISK_GB:=40}"               # ceph VM OS disk
+: "${CEPH_OSD_COUNT:=3}"                   # extra data disks == OSDs (one per disk)
+: "${CEPH_POOL_REPLICA:=3}"                # replicated pool size; usable = raw / replica
+: "${CEPH_POOL_USABLE_GB:=200}"            # target usable capacity of the RBD data pool
+: "${CEPH_RBD_POOL:=ocs-storagepool}"      # RBD data pool ODF external consumes
+# External-details exporter (rook's create-external-cluster-resources.py). Run
+# INSIDE cephadm shell (has ceph + rados/rbd bindings). ITERATE: pin/override if
+# the upstream layout changes.
+: "${CEPH_EXPORTER_URL:=https://raw.githubusercontent.com/rook/rook/master/deploy/examples/create-external-cluster-resources.py}"
+# Per-OSD raw disk size to yield CEPH_POOL_USABLE_GB usable at CEPH_POOL_REPLICA
+# across CEPH_OSD_COUNT OSDs, plus ~18% headroom for Ceph's full-ratio (~0.95)
+# and BlueStore overhead so the pool's MAX AVAIL comfortably reaches the target.
+#   usable = raw_per_osd * osd_count / replica  ->  raw_per_osd = usable*replica/osd_count
+: "${CEPH_OSD_DISK_GB:=$(( CEPH_POOL_USABLE_GB * CEPH_POOL_REPLICA * 118 / (CEPH_OSD_COUNT * 100) ))}"
+
+# Ceph node topology (a single VM on the same libvirt network as the cluster,
+# reachable only from the EC2 host). Not part of compute_nodes/compute_spares:
+# it is NOT an OpenShift node and never gets a BMH or takes part in the install.
+# IPs: gateway .1, VIPs .5/.6, masters .11+, workers .21+ -> ceph takes .10.
+# MAC uses role byte 03 (masters 01, workers 02) so it can't collide.
+CEPH_HOST="ceph-0"
+CEPH_NODE_NAME="${CLUSTER_NAME}-ceph-0"
+CEPH_IP="${NET_CIDR%.*}.10"
+CEPH_MAC="52:54:00:6a:03:00"
+
+# EC2 root volume. With ODF enabled, add the ceph OSDs' raw footprint on top of
+# the base so the host disk can actually hold a full 200 GB pool (the qcow2 OSD
+# files are sparse, so this is headroom, not up-front usage).
+if [[ "${ODF_ENABLED}" == "true" ]]; then
+  _ec2_vol_default=$(( 1000 + CEPH_OSD_COUNT * CEPH_OSD_DISK_GB ))
+else
+  _ec2_vol_default=1000
+fi
+: "${EC2_VOLUME_SIZE_GB:=${_ec2_vol_default}}"
 
 # Derived paths
 LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

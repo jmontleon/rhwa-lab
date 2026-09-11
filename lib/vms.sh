@@ -147,7 +147,9 @@ vms_teardown() {
   compute_nodes; compute_spares
   ssh_host 'sudo podman rm -f sushy >/dev/null 2>&1 || true' || true
   local name
-  for name in "${NODE_NAME[@]}" "${SPARE_NAME[@]}"; do
+  # Include the external-Ceph VM (harmless if it was never defined). Its extra
+  # OSD disks are removed with --remove-all-storage alongside the root disk.
+  for name in "${NODE_NAME[@]}" "${SPARE_NAME[@]}" "${CEPH_NODE_NAME}"; do
     ssh_host "sudo bash -c '
       virsh destroy \"${name}\" 2>/dev/null || true
       virsh undefine \"${name}\" --nvram --remove-all-storage 2>/dev/null || true'" || true
