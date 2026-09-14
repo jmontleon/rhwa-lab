@@ -7,7 +7,7 @@ host_install_packages() {
   ssh_host 'sudo bash -s' <<'EOS'
 set -euo pipefail
 sudo dnf -y install qemu-kvm libvirt virt-install libvirt-client \
-     podman haproxy jq httpd-tools openssl bind-utils nmstate >/dev/null
+     podman haproxy jq httpd-tools openssl bind-utils nmstate genisoimage >/dev/null
 sudo systemctl enable --now libvirtd
 # Nested KVM sanity: /dev/kvm must exist (L0 passes VT-x when NestedVirtualization=enabled)
 if [[ ! -e /dev/kvm ]]; then echo "ERROR: /dev/kvm missing - nested virt not active"; exit 1; fi
@@ -29,6 +29,11 @@ host_libvirt_network() {
   for i in "${!SPARE_MAC[@]}"; do
     reservations+="      <host mac='${SPARE_MAC[$i]}' name='${SPARE_HOST[$i]}' ip='${SPARE_IP[$i]}'/>"$'\n'
   done
+  # External-Ceph VM (ODF): pin its IP too so cephadm's mon-ip and ODF's imported
+  # mon endpoint stay stable across reboots. Not an OpenShift node.
+  if [[ "${CEPH_ENABLED:-true}" == "true" ]]; then
+    reservations+="      <host mac='${CEPH_MAC}' name='${CEPH_HOST}' ip='${CEPH_IP}'/>"$'\n'
+  fi
   ssh_host "cat > /tmp/${LIBVIRT_NET}.xml" <<EOX
 <network>
   <name>${LIBVIRT_NET}</name>

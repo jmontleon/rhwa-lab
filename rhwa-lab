@@ -37,6 +37,7 @@ source "${SELF_DIR}/lib/host.sh"
 source "${SELF_DIR}/lib/vms.sh"
 source "${SELF_DIR}/lib/openshift.sh"
 source "${SELF_DIR}/lib/rhwa.sh"
+source "${SELF_DIR}/lib/odf.sh"
 source "${SELF_DIR}/lib/testfence.sh"
 source "${SELF_DIR}/lib/power.sh"
 
@@ -60,6 +61,13 @@ report() {
   else
     spares=" Spare workers     : none"
   fi
+  local odf=""
+  if [[ "${ODF_ENABLED}" == "true" ]]; then
+    odf=" ODF (external)    : StorageCluster 'ocs-external-storagecluster' -> Ceph on ${CEPH_NODE_NAME} (${CEPH_IP})
+                     RBD pool '${CEPH_RBD_POOL}' (replica ${CEPH_POOL_REPLICA}, ${CEPH_OSD_COUNT}x${CEPH_OSD_DISK_GB} GB OSDs, ~${CEPH_POOL_USABLE_GB} GB usable)"
+  else
+    odf=" ODF (external)    : disabled (ODF_ENABLED=false)"
+  fi
   cat >&2 <<EOF
 
 $(printf '\033[1;32m')========================================================================
@@ -70,6 +78,7 @@ $(printf '\033[1;32m')==========================================================
  kubeadmin password : ${pw}
  kubeconfig         : ${KUBECONFIG_LOCAL}
 ${spares}
+${odf}
 
  Use the cluster:
    export KUBECONFIG=${KUBECONFIG_LOCAL}
@@ -106,6 +115,7 @@ cmd_create() {
   os_wait_cluster_ready
   rhwa_setup
   os_provision_workers
+  odf_setup
   record_ssh_channel
   _RHWA_IN_CREATE=
   ok "Create complete"

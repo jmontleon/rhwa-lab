@@ -19,4 +19,8 @@ assert_contains "$STUB_OUT" "192.168.126.11"
 # first spare = worker-3 reservation (idx=3 -> .24, mac ...:02:03)
 assert_contains "$STUB_OUT" "52:54:00:6a:02:03"
 assert_contains "$STUB_OUT" "192.168.126.24"
+# external-Ceph VM reservation (role byte 03 -> .10), present when CEPH_ENABLED
+assert_contains "$STUB_OUT" "52:54:00:6a:03:00"
+assert_contains "$STUB_OUT" "192.168.126.10"
+assert_contains "$STUB_OUT" "name='ceph-0'"
 echo "PASS"
