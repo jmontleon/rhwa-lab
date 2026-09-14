@@ -353,8 +353,65 @@ os_provision_workers() {
 # the cluster is never left with nothing schedulable.
 os_unschedule_masters() {
   log "Removing worker role from masters (mastersSchedulable=false)"
-  oc patch schedulers.config.openshift.io/cluster --type=merge \
-    -p '{"spec":{"mastersSchedulable":false}}' >/dev/null 2>&1 \
-    && ok "Control plane set non-schedulable" \
-    || warn "could not set mastersSchedulable=false; masters keep the worker role"
+  if oc patch schedulers.config.openshift.io/cluster --type=merge \
+       -p '{"spec":{"mastersSchedulable":false}}' >/dev/null 2>&1; then
+    ok "Control plane set non-schedulable"
+    os_evict_stranded_daemons
+  else
+    warn "could not set mastersSchedulable=false; masters keep the worker role"
+  fi
+}
+
+# Flipping mastersSchedulable=false adds a node-role.kubernetes.io/master:NoSchedule
+# taint to the control plane. DaemonSet pods placed on the masters while they were
+# still schedulable (e.g. ingress-canary, insights-runtime-extractor) do not tolerate
+# that taint, but NoSchedule never evicts running pods -- so they linger as orphans and
+# trip KubeDaemonSetMisScheduled / KubeDaemonSetRolloutStuck indefinitely. Delete those
+# stranded pods once the taint is in place; the DaemonSet controller will not recreate
+# them on the tainted masters, while taint-tolerating daemons (ovn-kube, mcd,
+# node-exporter, ...) are left untouched.
+os_evict_stranded_daemons() {
+  local masters node ns name i tainted count found=0
+
+  masters="$(oc get nodes -l node-role.kubernetes.io/master \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)" || return 0
+  [[ -n "$masters" ]] || return 0
+  count="$(wc -w <<<"$masters")"
+
+  # Wait (up to ~60s) for the control-plane NoSchedule taint so evicted pods are
+  # not immediately rescheduled onto a still-schedulable master.
+  for ((i=0; i<20; i++)); do
+    tainted=0
+    for node in $masters; do
+      if oc get node "$node" -o jsonpath='{.spec.taints[*].key}' 2>/dev/null \
+           | grep -q 'node-role.kubernetes.io/master'; then
+        tainted=$((tainted + 1))
+      fi
+    done
+    [[ "$tainted" -eq "$count" ]] && break
+    sleep 3
+  done
+
+  log "Clearing DaemonSet pods stranded on the control plane"
+  for node in $masters; do
+    while read -r ns name; do
+      [[ -n "$ns" && -n "$name" ]] || continue
+      if oc -n "$ns" delete pod "$name" --wait=false >/dev/null 2>&1; then
+        ok "evicted stranded ${ns}/${name}"
+        found=1
+      fi
+    done < <(oc get pods -A --field-selector "spec.nodeName=${node}" -o json 2>/dev/null \
+      | jq -r '.items[]
+          | select(any(.metadata.ownerReferences[]?; .kind == "DaemonSet"))
+          | select( ( [ .spec.tolerations[]?
+                | select(
+                    ( (.key == "node-role.kubernetes.io/master"
+                       or .key == "node-role.kubernetes.io/control-plane")
+                      and (.effect == null or .effect == "" or .effect == "NoSchedule") )
+                    or ( (.key == null or .key == "") and .operator == "Exists" )
+                  ) ] | length ) == 0 )
+          | "\(.metadata.namespace) \(.metadata.name)"' 2>/dev/null)
+  done
+  [[ "$found" -eq 0 ]] && log "No stranded DaemonSet pods found on the control plane"
+  return 0
 }
