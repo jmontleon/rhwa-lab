@@ -26,7 +26,15 @@
 : "${CP_RAM_GB:=20}"
 : "${WK_VCPU:=4}"
 : "${WK_RAM_GB:=16}"
-: "${NODE_DISK_GB:=120}"
+: "${NODE_DISK_GB:=120}"                # each OpenShift node's root: its OWN EBS volume (raw)
+# OpenShift node root disks: one dedicated EBS volume per node (masters + workers
+# + spares), passed to the node VM as a raw block device -- so node I/O (etcd,
+# container images) doesn't contend with the host or other nodes on one volume.
+# Set NODE_ATTACH_EBS=false to fall back to qcow2 files on the host root volume.
+: "${NODE_ATTACH_EBS:=true}"
+: "${NODE_VOLUME_TYPE:=gp3}"
+: "${NODE_VOLUME_IOPS:=3000}"
+: "${NODE_VOLUME_THROUGHPUT:=125}"
 
 # Lab network (on the EC2 host's libvirt bridge)
 : "${LIBVIRT_NET:=rhwa}"
@@ -111,7 +119,18 @@ esac
 : "${CEPH_OSD_VOLUME_TYPE:=gp3}"           # gp3 (default) | io2 | io1 | gp2 ...
 : "${CEPH_OSD_VOLUME_IOPS:=3000}"          # gp3 baseline 3000 (free) up to 16000; io2 up to 256000
 : "${CEPH_OSD_VOLUME_THROUGHPUT:=125}"     # gp3 only: MB/s, baseline 125 (free) up to 1000
+# Ceph VM root (OS) disk: also its own dedicated EBS volume (raw), so it's off
+# the shared host volume like everything else. Low I/O, so gp3 baseline.
+: "${CEPH_ROOT_ATTACH_EBS:=${CEPH_ENABLED}}"
+: "${CEPH_ROOT_VOLUME_TYPE:=gp3}"
 : "${ROOT_VOLUME_TYPE:=gp3}"               # EC2 host root volume type
+
+# Dedicated volumes are told apart on the host BY SIZE, so the sizes that are
+# actually attached must be mutually distinct. Fail early if a config collides.
+_sz_guard() { [[ "$1" -ne "$2" ]] || { printf 'ERROR: storage sizes must differ for size-based disk id: %s (%s GiB) == %s (%s GiB). Change one.\n' "$3" "$1" "$4" "$2" >&2; exit 1; }; }
+if [[ "${NODE_ATTACH_EBS}" == "true" && "${CEPH_OSD_ATTACH_EBS}" == "true" ]]; then _sz_guard "$NODE_DISK_GB" "$CEPH_OSD_DISK_GB" NODE_DISK_GB CEPH_OSD_DISK_GB; fi
+if [[ "${NODE_ATTACH_EBS}" == "true" && "${CEPH_ROOT_ATTACH_EBS}" == "true" ]]; then _sz_guard "$NODE_DISK_GB" "$CEPH_ROOT_DISK_GB" NODE_DISK_GB CEPH_ROOT_DISK_GB; fi
+if [[ "${CEPH_OSD_ATTACH_EBS}" == "true" && "${CEPH_ROOT_ATTACH_EBS}" == "true" ]]; then _sz_guard "$CEPH_OSD_DISK_GB" "$CEPH_ROOT_DISK_GB" CEPH_OSD_DISK_GB CEPH_ROOT_DISK_GB; fi
 
 # Ceph node topology (a single VM on the same libvirt network as the cluster,
 # reachable only from the EC2 host). Not part of compute_nodes/compute_spares:
@@ -123,10 +142,12 @@ CEPH_NODE_NAME="${CLUSTER_NAME}-ceph-0"
 CEPH_IP="${NET_CIDR%.*}.10"
 CEPH_MAC="52:54:00:6a:03:00"
 
-# EC2 root/OS volume. OSDs now live on their OWN dedicated volumes (see above),
-# so the root only holds the host OS + the OpenShift node qcow2 images + agent
-# ISO/RHCOS + the ceph VM's small OS disk -- no need to size it for the pool.
-: "${EC2_VOLUME_SIZE_GB:=1000}"
+# EC2 host root/OS volume. Every VM disk (node roots, ceph VM root, OSDs) now
+# lives on its own dedicated EBS volume, so the host root only holds the OS and
+# provisioning artifacts: the agent ISO, cached RHCOS images, the ceph cloud
+# base image, seed ISOs, and the oc/openshift-install binaries. 120 GiB is
+# ample; bump if you cache unusually large images.
+: "${EC2_VOLUME_SIZE_GB:=100}"
 
 # Derived paths
 LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

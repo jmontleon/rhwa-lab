@@ -182,38 +182,51 @@ if [[ ! -f '${base}' ]]; then
   curl -fsSL '${CEPH_CLOUD_IMAGE_URL}' -o '${base}.tmp'
   mv '${base}.tmp' '${base}'
 fi
-# Ceph VM OS disk: COW off the cached base (small; lives on the root volume).
-[[ -f '${root}' ]] || qemu-img create -f qcow2 -F qcow2 -b '${base}' '${root}' ${CEPH_ROOT_DISK_GB}G >/dev/null
-# OSD backing = the DEDICATED whole disks on this instance (one EBS volume per
-# OSD, or instance-store NVMe) -- i.e. every whole disk EXCEPT the root disk. We
-# pass them to the ceph VM as RAW block devices (cache=none,io=native for direct
-# I/O), so BlueStore owns a real device and each has its own IOPS budget instead
-# of sharing the root volume through a qcow2 file.
+# Identify the host root disk (excluded from the size-based disk search below).
 root_part="\$(findmnt -no SOURCE / | head -1)"
 root_disk="/dev/\$(lsblk -no PKNAME "\$root_part" 2>/dev/null | head -1)"
 [[ "\$root_disk" == "/dev/" ]] && root_disk="\$root_part"   # root already a whole disk
+# Whole disks of an exact size (GiB), excluding the host root disk, sorted. This
+# is how we tell the dedicated volumes apart (OSD vs ceph-root vs node): by size.
+disks_of_gib() { local b=\$(( \$1 * 1024 * 1024 * 1024 ))
+  lsblk -dbn -o NAME,TYPE,SIZE | awk -v b="\$b" '\$2=="disk" && \$3==b {print "/dev/"\$1}' | grep -vx "\$root_disk" | sort; }
+
+# Ceph VM OS disk.
+if [[ "${CEPH_ROOT_ATTACH_EBS}" == "true" ]]; then
+  # Its OWN dedicated raw volume: write the cloud image onto it (cloud-init
+  # growpart expands the root FS to fill), then boot from it -- off the host root.
+  rootdev="\$(disks_of_gib ${CEPH_ROOT_DISK_GB} | head -1)"
+  [[ -n "\$rootdev" ]] || { echo "ERROR: no ${CEPH_ROOT_DISK_GB} GiB dedicated disk for the ceph VM root (CEPH_ROOT_ATTACH_EBS):" >&2; lsblk -dpn -o NAME,SIZE,TYPE >&2; exit 1; }
+  qemu-img convert -f qcow2 -O raw '${base}' "\$rootdev"
+  root_disk_arg="path=\$rootdev,device=disk,bus=virtio,cache=none,io=native,format=raw"
+else
+  [[ -f '${root}' ]] || qemu-img create -f qcow2 -F qcow2 -b '${base}' '${root}' ${CEPH_ROOT_DISK_GB}G >/dev/null
+  root_disk_arg="path=${root},bus=virtio"
+fi
+
+# OSD backing = the dedicated OSD-sized whole disks, passed RAW (cache=none,
+# io=native) so BlueStore owns a real device with its own IOPS budget.
 osd_args=""; osd_n=0
-for d in \$(lsblk -dpn -o NAME,TYPE | awk '\$2=="disk"{print \$1}' | grep -vx "\$root_disk" | sort); do
+for d in \$(disks_of_gib ${CEPH_OSD_DISK_GB}); do
   osd_args="\$osd_args --disk path=\$d,device=disk,bus=virtio,cache=none,io=native,format=raw"
   osd_n=\$(( osd_n + 1 ))
 done
 if [[ "\$osd_n" -ne ${CEPH_OSD_COUNT} ]]; then
-  echo "ERROR: expected ${CEPH_OSD_COUNT} dedicated OSD disk(s) but found \$osd_n (root=\$root_disk). Attached EBS OSD volumes (CEPH_OSD_ATTACH_EBS) or instance-store disks must equal CEPH_OSD_COUNT:" >&2
+  echo "ERROR: expected ${CEPH_OSD_COUNT} dedicated ${CEPH_OSD_DISK_GB} GiB OSD disk(s) but found \$osd_n. Attached EBS OSD volumes (CEPH_OSD_ATTACH_EBS) or instance-store disks must equal CEPH_OSD_COUNT:" >&2
   lsblk -dpn -o NAME,SIZE,TYPE >&2; exit 1
 fi
 # Build the NoCloud seed (label 'cidata'; user-data + meta-data + network-config).
 genisoimage -quiet -output '${seed}' -volid cidata -joliet -rock \
   ${seeddir}/user-data ${seeddir}/meta-data ${seeddir}/network-config
-# Import the cloud image (BIOS boot; no UEFI override) with the raw OSD disks and
-# the seed cdrom. print-xml/define/start mirrors vms.sh; the root qcow2 + seed ISO
-# are persistent and the OSD block devices are stable, so 'virsh start' won't miss.
+# Import the cloud image (BIOS boot; no UEFI override) with the root + raw OSD
+# disks and the seed cdrom. print-xml/define/start mirrors vms.sh.
 virt-install \
   --name '${CEPH_NODE_NAME}' \
   --memory ${ram_mb} \
   --vcpus ${CEPH_VCPU} \
   --cpu host-passthrough \
   --os-variant centos-stream9 \
-  --disk path='${root}',bus=virtio \$osd_args \
+  --disk \$root_disk_arg \$osd_args \
   --disk path='${seed}',device=cdrom \
   --network network=${LIBVIRT_NET},mac='${CEPH_MAC}',model=virtio \
   --graphics none --noautoconsole --import --print-xml 1 > /tmp/${CEPH_NODE_NAME}.xml

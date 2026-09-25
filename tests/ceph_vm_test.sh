@@ -22,14 +22,14 @@ host_ip(){ echo x; }
 scp_to(){ :; }   # seed files are shipped to the host; no-op in the test
 odf_ceph_define_vm
 
-# OSDs are the host's DEDICATED whole disks (all disks except the root), passed
-# through RAW with direct I/O -- NOT qcow2 files on the shared root volume.
-assert_contains     "$STUB_OUT" "lsblk -dpn -o NAME,TYPE"
+# OSDs and the ceph VM root are DEDICATED whole disks identified BY SIZE and
+# passed RAW (direct I/O) -- not qcow2 files on the shared host volume.
+assert_contains     "$STUB_OUT" "disks_of_gib"                                        # size-based disk id
 assert_contains     "$STUB_OUT" "device=disk,bus=virtio,cache=none,io=native,format=raw"
-assert_contains     "$STUB_OUT" "expected 3 dedicated OSD disk(s)"   # count-checked
-assert_not_contains "$STUB_OUT" "t-ceph-0-vdb.qcow2"                 # no per-OSD qcow2
-# COW root off a cached base image (not a full copy).
-assert_contains "$STUB_OUT" "-b '/var/lib/libvirt/images/ceph-base.qcow2'"
+assert_contains     "$STUB_OUT" "236 GiB OSD disk(s)"                                 # OSD count-checked by size
+assert_not_contains "$STUB_OUT" "t-ceph-0-vdb.qcow2"                                  # no per-OSD qcow2
+# ceph VM root written onto its own dedicated raw volume (cloud image -> raw dev).
+assert_contains     "$STUB_OUT" "qemu-img convert -f qcow2 -O raw '/var/lib/libvirt/images/ceph-base.qcow2'"
 # Our own persistent NoCloud seed ISO (cidata), attached as a cdrom.
 assert_contains "$STUB_OUT" "genisoimage"
 assert_contains "$STUB_OUT" "-volid cidata"

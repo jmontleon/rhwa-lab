@@ -7,7 +7,7 @@
 # masters boot the agent ISO (ABI); workers get an EMPTY cdrom so ironic can
 # insert virtual media at provision time (no agent ISO welded on).
 _vm_define_domain() {
-  local name="$1" ram_gb="$2" vcpu="$3" mac="$4" role="$5" ram_mb=$(( $2 * 1024 ))
+  local name="$1" ram_gb="$2" vcpu="$3" mac="$4" role="$5" node_idx="${6:-0}" ram_mb=$(( $2 * 1024 ))
   local cdrom
   if [[ "$role" == "master" ]]; then
     cdrom="--disk path=/var/lib/libvirt/images/${CLUSTER_NAME}-agent.iso,device=cdrom"
@@ -19,7 +19,24 @@ set -e
 if virsh dominfo '${name}' >/dev/null 2>&1; then
   echo "domain ${name} exists, skipping"
 else
-  qemu-img create -f qcow2 /var/lib/libvirt/images/${name}.qcow2 ${NODE_DISK_GB}G >/dev/null
+  if [[ "${NODE_ATTACH_EBS}" == "true" ]]; then
+    # Root = this node's OWN dedicated ${NODE_DISK_GB} GiB EBS volume, passed raw
+    # (cache=none,io=native) so node I/O doesn't contend on the host volume. Pick
+    # the (${node_idx})-th ${NODE_DISK_GB} GiB whole disk (excluding the host root),
+    # sorted -- a distinct disk per node, fixed for the instance's life. Which
+    # physical volume a node gets is arbitrary (identity comes from DHCP/agent-
+    # config, not the disk); the installer writes RHCOS onto the blank volume.
+    root_part="\$(findmnt -no SOURCE / | head -1)"
+    root_disk="/dev/\$(lsblk -no PKNAME "\$root_part" 2>/dev/null | head -1)"
+    [[ "\$root_disk" == "/dev/" ]] && root_disk="\$root_part"
+    b=\$(( ${NODE_DISK_GB} * 1024 * 1024 * 1024 ))
+    dev="\$(lsblk -dbn -o NAME,TYPE,SIZE | awk -v b="\$b" '\$2=="disk" && \$3==b {print "/dev/"\$1}' | grep -vx "\$root_disk" | sort | sed -n "\$(( ${node_idx} + 1 ))p")"
+    [[ -n "\$dev" ]] || { echo "ERROR: no dedicated ${NODE_DISK_GB} GiB node disk #${node_idx} for ${name} (NODE_ATTACH_EBS); attached node volumes must equal masters+workers+spares:" >&2; lsblk -dpn -o NAME,SIZE,TYPE >&2; exit 1; }
+    disk_arg="--disk path=\$dev,device=disk,bus=virtio,cache=none,io=native,format=raw"
+  else
+    qemu-img create -f qcow2 /var/lib/libvirt/images/${name}.qcow2 ${NODE_DISK_GB}G >/dev/null
+    disk_arg="--disk path=/var/lib/libvirt/images/${name}.qcow2,bus=virtio"
+  fi
   # Generate domain XML and define WITHOUT starting (--print-xml + virsh define).
   virt-install \
     --name '${name}' \
@@ -27,7 +44,7 @@ else
     --vcpus ${vcpu} \
     --cpu host-passthrough \
     --os-variant rhel9.4 \
-    --disk path=/var/lib/libvirt/images/${name}.qcow2,bus=virtio \
+    \$disk_arg \
     ${cdrom} \
     --network network=${LIBVIRT_NET},mac='${mac}',model=virtio \
     --boot uefi,hd,cdrom \
@@ -57,12 +74,17 @@ vms_define() {
   compute_nodes; compute_spares
   local total=$(( ${#NODE_NAME[@]} + ${#SPARE_NAME[@]} ))
   log "Defining ${total} libvirt domains (${#SPARE_NAME[@]} spare, not booted during install)"
-  local i
+  # gidx is a GLOBAL node index across masters+workers+spares, matching the count
+  # of dedicated node volumes attached at launch -- each node maps to a distinct
+  # ${NODE_DISK_GB} GiB disk (see _vm_define_domain).
+  local i gidx=0
   for i in "${!NODE_NAME[@]}"; do
-    _vm_define_domain "${NODE_NAME[$i]}" "${NODE_RAM[$i]}" "${NODE_VCPU[$i]}" "${NODE_MAC[$i]}" "${NODE_ROLE[$i]}"
+    _vm_define_domain "${NODE_NAME[$i]}" "${NODE_RAM[$i]}" "${NODE_VCPU[$i]}" "${NODE_MAC[$i]}" "${NODE_ROLE[$i]}" "$gidx"
+    gidx=$(( gidx + 1 ))
   done
   for i in "${!SPARE_NAME[@]}"; do
-    _vm_define_domain "${SPARE_NAME[$i]}" "${SPARE_RAM[$i]}" "${SPARE_VCPU[$i]}" "${SPARE_MAC[$i]}" "${SPARE_ROLE[$i]}"
+    _vm_define_domain "${SPARE_NAME[$i]}" "${SPARE_RAM[$i]}" "${SPARE_VCPU[$i]}" "${SPARE_MAC[$i]}" "${SPARE_ROLE[$i]}" "$gidx"
+    gidx=$(( gidx + 1 ))
   done
   ok "Domains defined"
 

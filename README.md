@@ -116,8 +116,10 @@ backed by a single-node **Ceph** cluster (`lib/odf.sh`). Enabled by default; set
 An extra libvirt VM (`<cluster>-ceph-0`, IP `192.168.126.10`, a CentOS-Stream
 cloud image) is created on the same `rhwa` network as the cluster — it is **not**
 an OpenShift node (no BMH, no fencing, not in `compute_nodes`). It gets
-`CEPH_OSD_COUNT` (default **3**) blank virtio data disks; `cephadm bootstrap
---single-host-defaults` brings up a one-host Ceph and adds **one OSD per disk**.
+`CEPH_OSD_COUNT` (default **3**) OSD disks — each a **dedicated EBS volume**
+passed to the VM as a **raw block device** (not a qcow2 file on the shared host
+volume); `cephadm bootstrap --single-host-defaults` brings up a one-host Ceph
+and adds **one OSD per disk**.
 A replicated RBD pool (`CEPH_RBD_POOL`, default `ocs-storagepool`) is created at
 `size = CEPH_POOL_REPLICA` (default **3**), and `--single-host-defaults` sets the
 CRUSH failure domain to OSD so all replicas fit on the one host.
@@ -131,11 +133,31 @@ CEPH_OSD_DISK_GB = CEPH_POOL_USABLE_GB * CEPH_POOL_REPLICA / CEPH_OSD_COUNT * 1.
 ```
 
 The ×1.18 is headroom for Ceph's full-ratio (~0.95) + BlueStore overhead, so
-`MAX AVAIL` on the pool lands comfortably above 200 GB. Because the qcow2 OSD
-files are sparse, `EC2_VOLUME_SIZE_GB` is bumped by the raw OSD footprint
-(`1000 + 3×236 ≈ 1708 GB` by default) so the host disk can actually hold a full
-pool; nothing is consumed up front. Override any of `CEPH_OSD_COUNT`,
-`CEPH_POOL_REPLICA`, `CEPH_POOL_USABLE_GB`, or `CEPH_OSD_DISK_GB` to resize.
+`MAX AVAIL` on the pool lands comfortably above 200 GB. Override any of
+`CEPH_OSD_COUNT`, `CEPH_POOL_REPLICA`, `CEPH_POOL_USABLE_GB`, or
+`CEPH_OSD_DISK_GB` to resize.
+
+### Storage layout (dedicated EBS volumes)
+
+To avoid I/O contention (which showed up as *"OSD(s) experiencing slow
+operations in BlueStore"*), **every VM disk is its own dedicated EBS volume**,
+attached at launch and passed to the VM as a **raw block device** — so each has
+its own IOPS/throughput budget instead of sharing one volume:
+
+| Disk | Size (GiB) | Knob |
+|---|---|---|
+| EC2 host root (OS + ISOs/images only) | `EC2_VOLUME_SIZE_GB` (100) | `ROOT_VOLUME_TYPE` |
+| OpenShift node roots (per master/worker/spare) | `NODE_DISK_GB` (120) | `NODE_ATTACH_EBS`, `NODE_VOLUME_TYPE/IOPS/THROUGHPUT` |
+| Ceph VM root (OS) | `CEPH_ROOT_DISK_GB` (40) | `CEPH_ROOT_ATTACH_EBS`, `CEPH_ROOT_VOLUME_TYPE` |
+| Ceph OSDs (per OSD) | `CEPH_OSD_DISK_GB` (~236) | `CEPH_OSD_ATTACH_EBS`, `CEPH_OSD_VOLUME_TYPE/IOPS/THROUGHPUT` |
+
+All default to **gp3** (independent 3000 IOPS / 125 MB-s baseline, bumpable to
+16000 / 1000; set `*_VOLUME_TYPE=io2` + `*_IOPS` for higher). The host tells the
+dedicated volumes apart **by size**, so those sizes must stay mutually distinct
+(a startup guard enforces it). Set a class's `*_ATTACH_EBS=false` to fall back to
+qcow2 on the host root (or, for OSDs, to use instance-store NVMe on an `m8id.*`
+instance — fastest, free, ephemeral). All volumes are `DeleteOnTermination`, so
+`destroy` reclaims them; the change takes effect on a fresh `create`.
 
 ODF itself is the `odf-operator` from the Red Hat catalog (channel `ODF_CHANNEL`,
 derived from `OCP_VERSION`) in `openshift-storage`. The external Ceph connection

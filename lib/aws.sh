@@ -114,28 +114,48 @@ aws_sg_allow() {
 }
 
 # Emit the run-instances --block-device-mappings entries (one per line):
-#   - the root/OS volume (${root_dev}), and
-#   - when ODF+Ceph are on and CEPH_OSD_ATTACH_EBS=true, one DEDICATED data
-#     volume per OSD (/dev/sdb, /dev/sdc, ...). Separate volumes give each OSD its
-#     own IOPS/throughput budget instead of sharing the root volume, and are
-#     passed to the ceph VM as raw block devices (see lib/odf.sh). All are
-#     DeleteOnTermination so `destroy` (instance terminate) reclaims them.
+#   - the root/OS volume (${root_dev}) -- host OS + provisioning artifacts only, and
+#   - one DEDICATED volume for each VM disk, so nothing shares the root volume's
+#     IOPS/throughput (each is passed to its VM as a raw block device -- see
+#     lib/vms.sh / lib/odf.sh; the host tells them apart by SIZE):
+#       * CEPH_OSD_COUNT OSD volumes         (CEPH_OSD_DISK_GB, if CEPH_OSD_ATTACH_EBS)
+#       * 1 Ceph VM root volume              (CEPH_ROOT_DISK_GB, if CEPH_ROOT_ATTACH_EBS)
+#       * 1 volume per OpenShift node        (NODE_DISK_GB, masters+workers+spares, if NODE_ATTACH_EBS)
+#     All DeleteOnTermination so `destroy` (instance terminate) reclaims them.
 # gp3 takes Iops+Throughput; io1/io2 take Iops only; gp2/others take neither.
 #   $1 = root device name (e.g. /dev/sda1 or /dev/xvda)
 _ebs_block_device_mappings() {
   local root_dev="$1"
   echo "DeviceName=${root_dev},Ebs={VolumeSize=${EC2_VOLUME_SIZE_GB},VolumeType=${ROOT_VOLUME_TYPE},DeleteOnTermination=true}"
-  [[ "${ODF_ENABLED}" == "true" && "${CEPH_ENABLED}" == "true" && "${CEPH_OSD_ATTACH_EBS}" == "true" ]] || return 0
-  local letters="bcdefghijklmnop" i dn ebs
-  for ((i=0; i<CEPH_OSD_COUNT; i++)); do
-    dn="/dev/sd${letters:$i:1}"
-    ebs="VolumeSize=${CEPH_OSD_DISK_GB},VolumeType=${CEPH_OSD_VOLUME_TYPE},DeleteOnTermination=true"
-    case "${CEPH_OSD_VOLUME_TYPE}" in
-      gp3)       ebs+=",Iops=${CEPH_OSD_VOLUME_IOPS},Throughput=${CEPH_OSD_VOLUME_THROUGHPUT}" ;;
-      io1|io2)   ebs+=",Iops=${CEPH_OSD_VOLUME_IOPS}" ;;
+  local letters="bcdefghijklmnopqrstuvwxyz" idx=0 dn ebs
+  _bdm_emit() {  # <size_gb> <type> <iops> <throughput>
+    dn="/dev/sd${letters:$idx:1}"; idx=$(( idx + 1 ))
+    ebs="VolumeSize=$1,VolumeType=$2,DeleteOnTermination=true"
+    case "$2" in
+      gp3)     ebs+=",Iops=$3,Throughput=$4" ;;
+      io1|io2) ebs+=",Iops=$3" ;;
     esac
     echo "DeviceName=${dn},Ebs={${ebs}}"
-  done
+  }
+  local i ceph_on=false
+  [[ "${ODF_ENABLED}" == "true" && "${CEPH_ENABLED}" == "true" ]] && ceph_on=true
+  # OSD data volumes
+  if [[ "$ceph_on" == "true" && "${CEPH_OSD_ATTACH_EBS}" == "true" ]]; then
+    for ((i=0; i<CEPH_OSD_COUNT; i++)); do
+      _bdm_emit "${CEPH_OSD_DISK_GB}" "${CEPH_OSD_VOLUME_TYPE}" "${CEPH_OSD_VOLUME_IOPS}" "${CEPH_OSD_VOLUME_THROUGHPUT}"
+    done
+  fi
+  # Ceph VM root (OS) volume
+  if [[ "$ceph_on" == "true" && "${CEPH_ROOT_ATTACH_EBS}" == "true" ]]; then
+    _bdm_emit "${CEPH_ROOT_DISK_GB}" "${CEPH_ROOT_VOLUME_TYPE}" 3000 125
+  fi
+  # OpenShift node root volumes: masters + workers + spares
+  if [[ "${NODE_ATTACH_EBS}" == "true" ]]; then
+    local nodes=$(( CONTROL_PLANE_COUNT + WORKER_COUNT + SPARE_WORKER_COUNT ))
+    for ((i=0; i<nodes; i++)); do
+      _bdm_emit "${NODE_DISK_GB}" "${NODE_VOLUME_TYPE}" "${NODE_VOLUME_IOPS}" "${NODE_VOLUME_THROUGHPUT}"
+    done
+  fi
 }
 
 aws_launch_instance() {
