@@ -1,0 +1,394 @@
+From ca3da88cd8d01f6e6da3b2c38743859114f79355 Mon Sep 17 00:00:00 2001
+From: Jason Montleon <jmontleo@redhat.com>
+Date: Wed, 16 Sep 2026 13:23:46 -0400
+Subject: [PATCH] compat(macos): run the control CLI on macOS as well as Linux
+
+The rhwa-lab CLI runs locally on the operator's machine (it SSHes to a Linux
+EC2 host for everything else). A few locally-run commands were GNU/Linux-only;
+make them portable so the tool works on macOS (Intel + Apple Silicon) too.
+Code that runs over SSH on the Linux host is unchanged.
+
+- openshift.sh: the LOCAL oc was always the Linux client tarball, which won't
+  execute on macOS. Select the client for the local OS/arch via uname
+  (mac / mac-arm64 / linux). os_host_tools still fetches the Linux client --
+  that one runs on the Linux EC2 host.
+- odf.sh: `base64 -w0` is GNU-only (macOS/BSD base64 has no -w); use
+  `base64 | tr -d '\n'`, which yields one unwrapped line on both. Replace bare
+  `mktemp` (BSD mktemp requires a template) with an explicit template.
+- tests: portable `mktemp` templates; drop bash-4-only `declare -A` from two
+  stubs (macOS ships bash 3.2) in favor of a file-backed / case-based stub; add
+  client_arch_test.sh covering the OS/arch client selection.
+- README: note Linux/macOS support (no GNU coreutils needed; stock bash 3.2 ok)
+  and that only the local CLI is cross-platform.
+
+Product bash is otherwise 3.2-clean and all local sed is BSD-safe.
+
+Signed-off-by: Jason Montleon <jmontleo@redhat.com>
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01V4B2ajQofcgjpqgNybrELZ
+---
+ README.md                       | 15 ++++++++++-----
+ lib/odf.sh                      |  8 +++++---
+ lib/openshift.sh                | 19 +++++++++++++++++--
+ tests/bmh_test.sh               |  4 ++--
+ tests/ceph_export_test.sh       |  4 ++--
+ tests/ceph_pool_test.sh         |  2 +-
+ tests/ceph_ssh_test.sh          |  2 +-
+ tests/ceph_vm_test.sh           |  4 ++--
+ tests/client_arch_test.sh       | 17 +++++++++++++++++
+ tests/install_config_test.sh    |  2 +-
+ tests/lib.sh                    |  2 +-
+ tests/mdr_operator_test.sh      |  2 +-
+ tests/odf_disabled_test.sh      |  2 +-
+ tests/odf_external_test.sh      |  4 ++--
+ tests/odf_operator_test.sh      |  2 +-
+ tests/provision_workers_test.sh |  2 +-
+ tests/state_channel_test.sh     |  6 ++++--
+ tests/vms_definitions_test.sh   | 12 +++++++++---
+ 18 files changed, 78 insertions(+), 31 deletions(-)
+ create mode 100644 tests/client_arch_test.sh
+
+diff --git a/README.md b/README.md
+index efe1076..797c302 100644
+--- a/README.md
++++ b/README.md
+@@ -18,11 +18,16 @@ no live AWS test has been performed. Expect to iterate. Design spec:
+ 
+ ## Prerequisites (your machine)
+ 
+-`bash`, `aws` CLI v2, `jq`, `curl`, `ssh`/`scp`, `tar`, `openssl`, and an SSH
+-keypair (`~/.ssh/id_rsa[.pub]` by default). `oc`/`openshift-install` are
+-downloaded automatically. An AWS account allowed to manage EC2/EIP/Route53
+-with enough On-Demand vCPU quota (~48). A Red Hat pull secret with Red Hat
+-registry entitlement.
++Runs on **Linux or macOS** (Intel or Apple Silicon). Needs `bash`, `aws` CLI
++v2, `jq`, `curl`, `ssh`/`scp`, `tar`, `openssl`, `base64` (all present by
++default on both) and an SSH keypair (`~/.ssh/id_rsa[.pub]` by default).
++`oc`/`openshift-install` are downloaded automatically — the local `oc` matches
++your OS/arch. No GNU coreutils required; macOS's stock `bash` 3.2 is fine.
++An AWS account allowed to manage EC2/EIP/Route53 with enough On-Demand vCPU
++quota (~48). A Red Hat pull secret with Red Hat registry entitlement.
++
++> The lab still provisions a **Linux** EC2 host and Linux guest VMs; only the
++> control CLI you run locally is cross-platform.
+ 
+ ## Usage
+ 
+diff --git a/lib/odf.sh b/lib/odf.sh
+index 48a9ea4..0f7c627 100644
+--- a/lib/odf.sh
++++ b/lib/odf.sh
+@@ -345,7 +345,7 @@ EOS
+ odf_ceph_export() {
+   [[ "${CEPH_ENABLED}" == "true" ]] || return 0
+   local out="${CLUSTER_DIR}/ceph-external.json"
+-  local err; err="$(mktemp)"
++  local err; err="$(mktemp "${TMPDIR:-/tmp}/rhwa-lab.XXXXXX")"
+   log "Exporting external Ceph connection details (rbd pool ${CEPH_RBD_POOL})"
+   _ssh_ceph "sudo bash -s" >"${out}" 2>"${err}" <<EOS
+ set -euo pipefail
+@@ -453,7 +453,7 @@ odf_import_external() {
+   # '*-secret-namespace' (=ODF_NAMESPACE) for EVERY '*-secret-name' so the SC ODF
+   # generates from these details is complete. This is the permanent fix -- ODF
+   # regenerates the SC from this data, so it can't be undone by editing the SC.
+-  local src; src="$(mktemp)"
++  local src; src="$(mktemp "${TMPDIR:-/tmp}/rhwa-lab.XXXXXX")"
+   jq --arg ns "${ODF_NAMESPACE}" '
+     map(if .kind=="StorageClass" and (.data|type=="object") then
+           .data += ( .data | to_entries
+@@ -481,7 +481,9 @@ odf_import_external() {
+       else empty end
+     ]}' "${src}" | oc apply -f -
+   # (b) the blob secret. .data values are base64, so base64(JSON) -> operator decodes it.
+-  local b64; b64="$(base64 -w0 "${src}")"
++  # `base64 | tr -d '\n'` is portable (GNU wraps at 76 by default; macOS/BSD
++  # base64 has no `-w0`), giving one unwrapped line on both.
++  local b64; b64="$(base64 "${src}" | tr -d '\n')"
+   oc apply -f - <<EOF
+ apiVersion: v1
+ kind: Secret
+diff --git a/lib/openshift.sh b/lib/openshift.sh
+index 6e54658..e936150 100644
+--- a/lib/openshift.sh
++++ b/lib/openshift.sh
+@@ -21,11 +21,26 @@ EOS
+ }
+ 
+ # Fetch a local oc for RHWA/test phases (talks to the public API endpoint).
++# This oc runs on the OPERATOR's machine (not the EC2 host), so pick the client
++# for the local OS/arch -- a Linux binary won't execute on macOS. os_host_tools
++# always fetches the Linux client because that one runs on the Linux EC2 host.
++_oc_client_tarball() {
++  case "$(uname -s)" in
++    Darwin)
++      case "$(uname -m)" in
++        arm64|aarch64) echo "openshift-client-mac-arm64.tar.gz" ;;
++        *)             echo "openshift-client-mac.tar.gz" ;;
++      esac ;;
++    *) echo "openshift-client-linux.tar.gz" ;;
++  esac
++}
++
+ os_local_oc() {
+   mkdir -p "$BIN_DIR"
+   [[ -x "${BIN_DIR}/oc" ]] && return 0
+-  log "Fetching local oc (${OCP_VERSION})"
+-  curl -fsSL "${MIRROR}/openshift-client-linux.tar.gz" | tar xz -C "$BIN_DIR" oc kubectl
++  local tb; tb="$(_oc_client_tarball)"
++  log "Fetching local oc (${OCP_VERSION}, ${tb})"
++  curl -fsSL "${MIRROR}/${tb}" | tar xz -C "$BIN_DIR" oc kubectl
+   ok "Local oc at ${BIN_DIR}/oc"
+ }
+ 
+diff --git a/tests/bmh_test.sh b/tests/bmh_test.sh
+index 7ea8980..abf42e0 100644
+--- a/tests/bmh_test.sh
++++ b/tests/bmh_test.sh
+@@ -10,7 +10,7 @@ export CLUSTER_NAME=t NET_CIDR=192.168.126.0/24 NET_GATEWAY=192.168.126.1 \
+ source "${DIR}/../lib/common.sh"
+ state_get(){ echo "uuid-$RANDOM"; }   # every node has a uuid
+ # Capture oc apply payloads + patch args.
+-OUT="$(mktemp)"
++OUT="$(mktemp "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")"
+ oc(){ printf '%s\n' "$*" >>"$OUT"; cat >>"$OUT" 2>/dev/null || true;
+       case "$*" in *"get baremetalhost worker-"*) return 1;; *"get baremetalhost master-"*) return 0;; esac; return 0; }
+ source "${DIR}/../lib/rhwa.sh"
+@@ -29,7 +29,7 @@ grep -q 'patch baremetalhost master-' "$OUT" || { echo "FAIL master must be patc
+ declare -F rhwa_configure_spare_bmh && { echo "FAIL spare fn still defined"; exit 1; }
+ 
+ # --- master BMH absent: self-heal by creating an externallyProvisioned host ---
+-OUT2="$(mktemp)"
++OUT2="$(mktemp "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")"
+ oc(){ printf '%s\n' "$*" >>"$OUT2"; cat >>"$OUT2" 2>/dev/null || true;
+       # every get baremetalhost misses -> exercise the create fallbacks
+       case "$*" in *"get baremetalhost "*) return 1;; esac; return 0; }
+diff --git a/tests/ceph_export_test.sh b/tests/ceph_export_test.sh
+index fb1df26..8073dd5 100644
+--- a/tests/ceph_export_test.sh
++++ b/tests/ceph_export_test.sh
+@@ -7,12 +7,12 @@ set -euo pipefail
+ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ source "${DIR}/lib.sh"
+ log(){ :; }; ok(){ :; }; warn(){ :; }; die(){ echo "DIE: $*"; exit 1; }
+-tmp="$(mktemp -d)"
++tmp="$(mktemp -d "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")"
+ export CEPH_ENABLED=true CEPH_RBD_POOL=ocs-storagepool ODF_NAMESPACE=openshift-storage \
+        CEPH_IP=192.168.126.10 CEPH_EXPORTER_URL=https://example.test/exporter.py \
+        CLUSTER_DIR="$tmp"
+ source "${DIR}/../lib/odf.sh"
+-CAP="$(mktemp)"
++CAP="$(mktemp "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")"
+ # Capture the remote script (stdin) to CAP; emit a valid JSON array on stdout so
+ # the function's jq validation passes (that stdout is redirected to the out file).
+ _ssh_ceph(){ cat >>"$CAP"; printf '%s' '[{"name":"rook-ceph-mon","kind":"Secret","data":{}}]'; }
+diff --git a/tests/ceph_pool_test.sh b/tests/ceph_pool_test.sh
+index 2a2f528..671022e 100644
+--- a/tests/ceph_pool_test.sh
++++ b/tests/ceph_pool_test.sh
+@@ -15,7 +15,7 @@ source "${DIR}/../lib/odf.sh"
+ state_get(){ echo ""; }   # not yet bootstrapped
+ state_set(){ :; }
+ _ceph_wait_ssh(){ :; }
+-OUT="$(mktemp)"
++OUT="$(mktemp "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")"
+ _ssh_ceph(){ printf '%s\n' "$*" >>"$OUT"; cat >>"$OUT" 2>/dev/null || true; }
+ odf_ceph_bootstrap
+ 
+diff --git a/tests/ceph_ssh_test.sh b/tests/ceph_ssh_test.sh
+index f19a067..ed35347 100644
+--- a/tests/ceph_ssh_test.sh
++++ b/tests/ceph_ssh_test.sh
+@@ -12,7 +12,7 @@ export CLUSTER_NAME=t OCP_VERSION=stable-4.22 NET_CIDR=192.168.126.0/24 \
+ source "${DIR}/../lib/common.sh"
+ source "${DIR}/../lib/odf.sh"
+ host_ip(){ echo 203.0.113.9; }
+-OUT="$(mktemp)"
++OUT="$(mktemp "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")"
+ ssh(){ printf '%s\n' "$*" >>"$OUT"; }   # capture the argv _ssh_ceph builds
+ _ssh_ceph "sudo bash -s" </dev/null
+ 
+diff --git a/tests/ceph_vm_test.sh b/tests/ceph_vm_test.sh
+index dd12e9e..67d3cb1 100644
+--- a/tests/ceph_vm_test.sh
++++ b/tests/ceph_vm_test.sh
+@@ -8,13 +8,13 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ source "${DIR}/lib.sh"
+ log(){ :; }; ok(){ :; }; warn(){ :; }
+ # A readable public key file (odf_ceph_define_vm reads it to inject via cloud-init).
+-KEY="$(mktemp)"; echo "ssh-ed25519 AAAATESTKEY ceph-test" >"$KEY"
++KEY="$(mktemp "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")"; echo "ssh-ed25519 AAAATESTKEY ceph-test" >"$KEY"
+ export CLUSTER_NAME=t BASE_DOMAIN=example.com OCP_VERSION=stable-4.22 \
+        NET_CIDR=192.168.126.0/24 LIBVIRT_NET=rhwa SSH_PUBLIC_KEY_FILE="$KEY" \
+        CEPH_OSD_COUNT=3 CEPH_OSD_DISK_GB=236 CEPH_ROOT_DISK_GB=40 \
+        CEPH_VCPU=4 CEPH_RAM_GB=16
+ source "${DIR}/../lib/common.sh"
+-CLUSTER_DIR="$(mktemp -d)/t"   # seed inputs are rendered under CLUSTER_DIR/ceph
++CLUSTER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")/t"   # seed inputs are rendered under CLUSTER_DIR/ceph
+ source "${DIR}/../lib/odf.sh"
+ state_get(){ echo ""; }   # ceph not yet bootstrapped -> (re)create path
+ stub_ssh_host
+diff --git a/tests/client_arch_test.sh b/tests/client_arch_test.sh
+new file mode 100644
+index 0000000..50c3d9f
+--- /dev/null
++++ b/tests/client_arch_test.sh
+@@ -0,0 +1,17 @@
++#!/usr/bin/env bash
++# The LOCAL oc must match the operator's OS/arch (a Linux binary won't run on
++# macOS). _oc_client_tarball picks the right client tarball from uname.
++set -euo pipefail
++DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++export OCP_VERSION=stable-4.22
++source "${DIR}/../lib/openshift.sh"
++
++# Stub uname to drive each scenario via env.
++uname(){ case "$1" in -s) echo "$_S" ;; -m) echo "$_M" ;; esac; }
++want(){ [[ "$(_oc_client_tarball)" == "$1" ]] || { echo "FAIL: S=$_S M=$_M -> $(_oc_client_tarball), want $1"; exit 1; }; }
++
++_S=Linux  _M=x86_64  ; want openshift-client-linux.tar.gz       # unchanged on Linux
++_S=Darwin _M=arm64   ; want openshift-client-mac-arm64.tar.gz   # Apple Silicon
++_S=Darwin _M=aarch64 ; want openshift-client-mac-arm64.tar.gz
++_S=Darwin _M=x86_64  ; want openshift-client-mac.tar.gz         # Intel Mac
++echo "PASS"
+diff --git a/tests/install_config_test.sh b/tests/install_config_test.sh
+index 5592322..f1ef6b9 100644
+--- a/tests/install_config_test.sh
++++ b/tests/install_config_test.sh
+@@ -16,7 +16,7 @@ echo "$out" | grep -q 'replicas: 3' || { echo "FAIL controlPlane replicas"; exit
+ echo "PASS"
+ # Render agent-config via os_render_configs into a temp CLUSTER_DIR and assert masters-only.
+ export PULL_SECRET='{"auths":{}}'
+-tmp="$(mktemp -d)"; export STATE_DIR="$tmp" CLUSTER_DIR="$tmp/t"
++tmp="$(mktemp -d "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")"; export STATE_DIR="$tmp" CLUSTER_DIR="$tmp/t"
+ scp_to(){ :; }   # not used here
+ os_render_configs
+ grep -q 'hostname: master-0' "$tmp/t/install/agent-config.yaml" || { echo "FAIL master missing"; exit 1; }
+diff --git a/tests/lib.sh b/tests/lib.sh
+index 5760bb0..f773f6d 100644
+--- a/tests/lib.sh
++++ b/tests/lib.sh
+@@ -1,6 +1,6 @@
+ #!/usr/bin/env bash
+ # Shared test helpers: stub ssh_host/oc to capture what they'd send.
+-STUB_OUT="$(mktemp)"
++STUB_OUT="$(mktemp "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")"
+ stub_ssh_host() {
+   # Captures a heredoc body (stdin) AND args into $STUB_OUT.
+   ssh_host() { printf '%s\n' "$*" >>"$STUB_OUT"; cat >>"$STUB_OUT" 2>/dev/null || true; }
+diff --git a/tests/mdr_operator_test.sh b/tests/mdr_operator_test.sh
+index 85e5e1c..d153af4 100755
+--- a/tests/mdr_operator_test.sh
++++ b/tests/mdr_operator_test.sh
+@@ -4,7 +4,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ source "${DIR}/lib.sh"
+ log(){ :; }; ok(){ :; }; warn(){ :; }
+ export RHWA_NAMESPACE=openshift-workload-availability RHWA_CHANNEL=stable
+-OUT="$(mktemp)"
++OUT="$(mktemp "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")"
+ # Source rhwa.sh first to get the function
+ source "${DIR}/../lib/rhwa.sh"
+ # Then override with stubs to prevent actual oc/kubectl calls
+diff --git a/tests/odf_disabled_test.sh b/tests/odf_disabled_test.sh
+index f8c212b..ef94d12 100644
+--- a/tests/odf_disabled_test.sh
++++ b/tests/odf_disabled_test.sh
+@@ -6,7 +6,7 @@ source "${DIR}/lib.sh"
+ log(){ :; }; ok(){ :; }; warn(){ :; }
+ export ODF_ENABLED=false CEPH_ENABLED=false
+ source "${DIR}/../lib/odf.sh"
+-OUT="$(mktemp)"
++OUT="$(mktemp "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")"
+ ssh_host(){ printf 'ssh_host %s\n' "$*" >>"$OUT"; }
+ _ssh_ceph(){ printf 'ssh_ceph %s\n' "$*" >>"$OUT"; }
+ oc(){ printf 'oc %s\n' "$*" >>"$OUT"; }
+diff --git a/tests/odf_external_test.sh b/tests/odf_external_test.sh
+index 892971b..7aa2c3b 100644
+--- a/tests/odf_external_test.sh
++++ b/tests/odf_external_test.sh
+@@ -12,7 +12,7 @@ set -euo pipefail
+ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ source "${DIR}/lib.sh"
+ log(){ :; }; ok(){ :; }; warn(){ :; }; die(){ echo "DIE: $*"; exit 1; }
+-tmp="$(mktemp -d)"
++tmp="$(mktemp -d "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")"
+ export CEPH_ENABLED=true ODF_NAMESPACE=openshift-storage CLUSTER_DIR="$tmp"
+ cat >"$tmp/ceph-external.json" <<'JSON'
+ [
+@@ -22,7 +22,7 @@ cat >"$tmp/ceph-external.json" <<'JSON'
+ ]
+ JSON
+ source "${DIR}/../lib/odf.sh"
+-OUT="$(mktemp)"
++OUT="$(mktemp "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")"
+ oc(){ printf '%s\n' "$*" >>"$OUT"; cat >>"$OUT" 2>/dev/null || true;
+       case "$*" in *"get storagecluster"*) echo Ready;; esac; }
+ 
+diff --git a/tests/odf_operator_test.sh b/tests/odf_operator_test.sh
+index f2420ab..daed16a 100644
+--- a/tests/odf_operator_test.sh
++++ b/tests/odf_operator_test.sh
+@@ -7,7 +7,7 @@ source "${DIR}/lib.sh"
+ log(){ :; }; ok(){ :; }; warn(){ :; }
+ export ODF_NAMESPACE=openshift-storage ODF_CHANNEL=stable-4.22
+ source "${DIR}/../lib/odf.sh"
+-OUT="$(mktemp)"
++OUT="$(mktemp "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")"
+ oc(){ printf '%s\n' "$*" >>"$OUT"; cat >>"$OUT" 2>/dev/null || true; }
+ _odf_wait_csv(){ printf 'wait_csv %s\n' "$1" >>"$OUT"; }
+ odf_install_operator
+diff --git a/tests/provision_workers_test.sh b/tests/provision_workers_test.sh
+index a086e2e..4456101 100644
+--- a/tests/provision_workers_test.sh
++++ b/tests/provision_workers_test.sh
+@@ -7,7 +7,7 @@ export WORKER_COUNT=3
+ export OCP_VERSION=4.18.0
+ export BIN_DIR=/tmp
+ export KUBECONFIG_LOCAL=/tmp/kubeconfig
+-OUT="$(mktemp)"
++OUT="$(mktemp "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")"
+ source "${DIR}/../lib/openshift.sh"
+ # Stub oc AFTER sourcing openshift.sh (which defines its own oc wrapper)
+ oc(){
+diff --git a/tests/state_channel_test.sh b/tests/state_channel_test.sh
+index 5fce1bc..2732d09 100644
+--- a/tests/state_channel_test.sh
++++ b/tests/state_channel_test.sh
+@@ -9,8 +9,10 @@ source "${DIR}/lib.sh"
+ export CLUSTER_NAME=t HOST_SSH_USER=fedora
+ export SSH_PUBLIC_KEY_FILE=/tmp/somekey.pub          # private => /tmp/somekey
+ source "${DIR}/../lib/common.sh" 2>/dev/null || true  # defines host_ip + record_ssh_channel
+-declare -A _STATE=([eip]=203.0.113.9)
+-state_set(){ _STATE["$1"]="$2"; }; state_get(){ echo "${_STATE[$1]:-}"; }
++# File-backed KV stub (no associative arrays -> runs on macOS's stock bash 3.2).
++_ST="$(mktemp "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")"; echo 'eip=203.0.113.9' >"$_ST"
++state_set(){ printf '%s=%s\n' "$1" "$2" >>"$_ST"; }
++state_get(){ local l; l="$(grep "^$1=" "$_ST" 2>/dev/null | tail -1)"; echo "${l#*=}"; }
+ PRIV_KEY="${SSH_PUBLIC_KEY_FILE%.pub}"
+ 
+ record_ssh_channel
+diff --git a/tests/vms_definitions_test.sh b/tests/vms_definitions_test.sh
+index 16e0735..0e612f3 100644
+--- a/tests/vms_definitions_test.sh
++++ b/tests/vms_definitions_test.sh
+@@ -7,9 +7,15 @@ export CLUSTER_NAME=t NET_CIDR=192.168.126.0/24 NET_GATEWAY=192.168.126.1 \
+        CONTROL_PLANE_COUNT=1 WORKER_COUNT=1 SPARE_WORKER_COUNT=0 \
+        CP_VCPU=8 CP_RAM_GB=20 WK_VCPU=4 WK_RAM_GB=16
+ source "${DIR}/../lib/common.sh"
+-declare -A S=([host_ip]=203.0.113.9 [host_user]=fedora [ssh_key_path]=/tmp/opkey \
+-              [uuid_t-master-0]=uu-m [uuid_t-worker-0]=uu-w)
+-state_get(){ echo "${S[$1]:-}"; }
++# case-based stub (no associative arrays -> runs on macOS's stock bash 3.2).
++state_get(){ case "$1" in
++  host_ip)          echo 203.0.113.9 ;;
++  host_user)        echo fedora ;;
++  ssh_key_path)     echo /tmp/opkey ;;
++  uuid_t-master-0)  echo uu-m ;;
++  uuid_t-worker-0)  echo uu-w ;;
++  *)                echo "" ;;
++esac; }
+ source "${DIR}/../lib/power.sh"
+ json="$(emit_vms_definitions)"
+ echo "$json" | jq -e '.host.ssh_key_path=="/tmp/opkey"' >/dev/null || { echo "FAIL key path (no presumed default)"; exit 1; }
+-- 
+2.55.0
+

@@ -113,6 +113,31 @@ aws_sg_allow() {
   ok "Allowed ${cidr} on ports 22/80/443/6443"
 }
 
+# Emit the run-instances --block-device-mappings entries (one per line):
+#   - the root/OS volume (${root_dev}), and
+#   - when ODF+Ceph are on and CEPH_OSD_ATTACH_EBS=true, one DEDICATED data
+#     volume per OSD (/dev/sdb, /dev/sdc, ...). Separate volumes give each OSD its
+#     own IOPS/throughput budget instead of sharing the root volume, and are
+#     passed to the ceph VM as raw block devices (see lib/odf.sh). All are
+#     DeleteOnTermination so `destroy` (instance terminate) reclaims them.
+# gp3 takes Iops+Throughput; io1/io2 take Iops only; gp2/others take neither.
+#   $1 = root device name (e.g. /dev/sda1 or /dev/xvda)
+_ebs_block_device_mappings() {
+  local root_dev="$1"
+  echo "DeviceName=${root_dev},Ebs={VolumeSize=${EC2_VOLUME_SIZE_GB},VolumeType=${ROOT_VOLUME_TYPE},DeleteOnTermination=true}"
+  [[ "${ODF_ENABLED}" == "true" && "${CEPH_ENABLED}" == "true" && "${CEPH_OSD_ATTACH_EBS}" == "true" ]] || return 0
+  local letters="bcdefghijklmnop" i dn ebs
+  for ((i=0; i<CEPH_OSD_COUNT; i++)); do
+    dn="/dev/sd${letters:$i:1}"
+    ebs="VolumeSize=${CEPH_OSD_DISK_GB},VolumeType=${CEPH_OSD_VOLUME_TYPE},DeleteOnTermination=true"
+    case "${CEPH_OSD_VOLUME_TYPE}" in
+      gp3)       ebs+=",Iops=${CEPH_OSD_VOLUME_IOPS},Throughput=${CEPH_OSD_VOLUME_THROUGHPUT}" ;;
+      io1|io2)   ebs+=",Iops=${CEPH_OSD_VOLUME_IOPS}" ;;
+    esac
+    echo "DeviceName=${dn},Ebs={${ebs}}"
+  done
+}
+
 aws_launch_instance() {
   if state_has instance_id; then
     log "Instance already recorded ($(state_get instance_id)); skipping launch"
@@ -139,6 +164,10 @@ aws_launch_instance() {
   [[ -z "$root_dev" || "$root_dev" == "None" ]] && root_dev="/dev/sda1"
   log "Launching ${INSTANCE_TYPE} from ${ami} (root ${root_dev}, nested virt enabled)"
 
+  local bdm=(); local m
+  while IFS= read -r m; do bdm+=("$m"); done < <(_ebs_block_device_mappings "$root_dev")
+  log "Block devices: ${#bdm[@]} volume(s) (root + $(( ${#bdm[@]} - 1 )) dedicated OSD volume(s))"
+
   local iid
   iid="$(aws ec2 run-instances \
       --image-id "$ami" \
@@ -146,7 +175,7 @@ aws_launch_instance() {
       --key-name "$KEYPAIR_NAME" \
       --security-group-ids "$(state_get sg_id)" \
       --cpu-options "NestedVirtualization=enabled" \
-      --block-device-mappings "DeviceName=${root_dev},Ebs={VolumeSize=${EC2_VOLUME_SIZE_GB},VolumeType=gp3,DeleteOnTermination=true}" \
+      --block-device-mappings "${bdm[@]}" \
       --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${CLUSTER_NAME}},{Key=rhwa-lab,Value=${CLUSTER_NAME}}]" \
       --query 'Instances[0].InstanceId' --output text)"
   [[ -z "$iid" || "$iid" == "None" ]] && die "run-instances failed."

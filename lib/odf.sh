@@ -61,12 +61,10 @@ _ceph_wait_ssh() {
   die "ceph VM ${CEPH_IP} did not become reachable over SSH (see diagnostics above)"
 }
 
-# Comma-free list of OSD device paths (vdb, vdc, ...): root is vda, so the extra
-# disks start at vdb. CEPH_OSD_COUNT<=9 (single letter) is plenty for a lab.
-_ceph_osd_devs() {
-  local letters="bcdefghij" i
-  for ((i=0; i<CEPH_OSD_COUNT; i++)); do printf 'vd%s ' "${letters:$i:1}"; done
-}
+# OSD backing devices are the DEDICATED whole disks attached to the EC2 instance
+# (one EBS volume per OSD, or instance-store NVMe), passed to the ceph VM as raw
+# block devices. They're discovered on the host at define time (all whole disks
+# except the root disk) -- see odf_ceph_define_vm.
 
 # Define the ceph VM on the host: a CentOS-Stream cloud image (backing-file COW
 # root) + CEPH_OSD_COUNT blank qcow2 data disks, brought up with a NoCloud
@@ -100,11 +98,6 @@ odf_ceph_define_vm() {
   local seed="/var/lib/libvirt/images/${CEPH_NODE_NAME}-seed.iso"
   local seeddir="/tmp/${CEPH_NODE_NAME}-seed"
   local dir="${CLUSTER_DIR}/ceph"; mkdir -p "$dir"
-  local osd_devs; osd_devs="$(_ceph_osd_devs)"
-  local osd_disks="" dev
-  for dev in ${osd_devs}; do
-    osd_disks+=" --disk path=/var/lib/libvirt/images/${CEPH_NODE_NAME}-${dev}.qcow2,bus=virtio"
-  done
 
   # Health check first, so a re-run only rebuilds when it actually needs to.
   local domstate
@@ -178,8 +171,9 @@ EOF
   ssh_host "sudo bash -s" <<EOS
 set -euo pipefail
 # We only get here to (re)build. Drop any leftover definition and rebuild a FRESH
-# root + seed so cloud-init re-runs and applies the current config; OSD data disks
-# are left in place (blank until ceph consumes them). Harmless if nothing exists.
+# root + seed so cloud-init re-runs and applies the current config. undefine
+# (no --remove-all-storage) leaves the raw OSD block devices untouched -- they're
+# passthrough EBS/NVMe, not libvirt-managed volumes. Harmless if nothing exists.
 virsh destroy '${CEPH_NODE_NAME}' 2>/dev/null || true
 virsh undefine '${CEPH_NODE_NAME}' 2>/dev/null || true
 rm -f '${root}' '${seed}'
@@ -188,26 +182,38 @@ if [[ ! -f '${base}' ]]; then
   curl -fsSL '${CEPH_CLOUD_IMAGE_URL}' -o '${base}.tmp'
   mv '${base}.tmp' '${base}'
 fi
-# Root (COW off base) + one blank data disk per OSD. Created only if missing so a
-# retry reuses what a previous attempt already built.
+# Ceph VM OS disk: COW off the cached base (small; lives on the root volume).
 [[ -f '${root}' ]] || qemu-img create -f qcow2 -F qcow2 -b '${base}' '${root}' ${CEPH_ROOT_DISK_GB}G >/dev/null
-for dev in ${osd_devs}; do
-  f="/var/lib/libvirt/images/${CEPH_NODE_NAME}-\${dev}.qcow2"
-  [[ -f "\$f" ]] || qemu-img create -f qcow2 "\$f" ${CEPH_OSD_DISK_GB}G >/dev/null
+# OSD backing = the DEDICATED whole disks on this instance (one EBS volume per
+# OSD, or instance-store NVMe) -- i.e. every whole disk EXCEPT the root disk. We
+# pass them to the ceph VM as RAW block devices (cache=none,io=native for direct
+# I/O), so BlueStore owns a real device and each has its own IOPS budget instead
+# of sharing the root volume through a qcow2 file.
+root_part="\$(findmnt -no SOURCE / | head -1)"
+root_disk="/dev/\$(lsblk -no PKNAME "\$root_part" 2>/dev/null | head -1)"
+[[ "\$root_disk" == "/dev/" ]] && root_disk="\$root_part"   # root already a whole disk
+osd_args=""; osd_n=0
+for d in \$(lsblk -dpn -o NAME,TYPE | awk '\$2=="disk"{print \$1}' | grep -vx "\$root_disk" | sort); do
+  osd_args="\$osd_args --disk path=\$d,device=disk,bus=virtio,cache=none,io=native,format=raw"
+  osd_n=\$(( osd_n + 1 ))
 done
+if [[ "\$osd_n" -ne ${CEPH_OSD_COUNT} ]]; then
+  echo "ERROR: expected ${CEPH_OSD_COUNT} dedicated OSD disk(s) but found \$osd_n (root=\$root_disk). Attached EBS OSD volumes (CEPH_OSD_ATTACH_EBS) or instance-store disks must equal CEPH_OSD_COUNT:" >&2
+  lsblk -dpn -o NAME,SIZE,TYPE >&2; exit 1
+fi
 # Build the NoCloud seed (label 'cidata'; user-data + meta-data + network-config).
 genisoimage -quiet -output '${seed}' -volid cidata -joliet -rock \
   ${seeddir}/user-data ${seeddir}/meta-data ${seeddir}/network-config
-# Import the cloud image (BIOS boot; no UEFI override) with the OSD disks and the
-# seed cdrom. print-xml/define/start mirrors vms.sh, but every referenced file
-# (root, OSD disks, seed ISO) is persistent, so 'virsh start' won't miss media.
+# Import the cloud image (BIOS boot; no UEFI override) with the raw OSD disks and
+# the seed cdrom. print-xml/define/start mirrors vms.sh; the root qcow2 + seed ISO
+# are persistent and the OSD block devices are stable, so 'virsh start' won't miss.
 virt-install \
   --name '${CEPH_NODE_NAME}' \
   --memory ${ram_mb} \
   --vcpus ${CEPH_VCPU} \
   --cpu host-passthrough \
   --os-variant centos-stream9 \
-  --disk path='${root}',bus=virtio${osd_disks} \
+  --disk path='${root}',bus=virtio \$osd_args \
   --disk path='${seed}',device=cdrom \
   --network network=${LIBVIRT_NET},mac='${CEPH_MAC}',model=virtio \
   --graphics none --noautoconsole --import --print-xml 1 > /tmp/${CEPH_NODE_NAME}.xml

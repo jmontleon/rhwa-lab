@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# The external-Ceph VM is defined with a COW root off a cached base image plus
-# one blank virtio data disk PER OSD at the derived size, and a NoCloud seed ISO
-# (built by us, not virt-install's transient one) injects the operator's SSH key
-# + host packages. It must NOT be an OpenShift node.
+# The external-Ceph VM is defined with a COW root off a cached base image, its
+# OSDs passed through as RAW dedicated block devices discovered on the host (not
+# qcow2 files on the shared root volume), and a NoCloud seed ISO (built by us)
+# injects the operator's SSH key. It must NOT be an OpenShift node.
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${DIR}/lib.sh"
@@ -22,11 +22,12 @@ host_ip(){ echo x; }
 scp_to(){ :; }   # seed files are shipped to the host; no-op in the test
 odf_ceph_define_vm
 
-# 3 blank OSD data disks at the derived size, one per device (vdb/vdc/vdd).
-assert_contains "$STUB_OUT" "t-ceph-0-vdb.qcow2"
-assert_contains "$STUB_OUT" "t-ceph-0-vdc.qcow2"
-assert_contains "$STUB_OUT" "t-ceph-0-vdd.qcow2"
-assert_contains "$STUB_OUT" "236G"
+# OSDs are the host's DEDICATED whole disks (all disks except the root), passed
+# through RAW with direct I/O -- NOT qcow2 files on the shared root volume.
+assert_contains     "$STUB_OUT" "lsblk -dpn -o NAME,TYPE"
+assert_contains     "$STUB_OUT" "device=disk,bus=virtio,cache=none,io=native,format=raw"
+assert_contains     "$STUB_OUT" "expected 3 dedicated OSD disk(s)"   # count-checked
+assert_not_contains "$STUB_OUT" "t-ceph-0-vdb.qcow2"                 # no per-OSD qcow2
 # COW root off a cached base image (not a full copy).
 assert_contains "$STUB_OUT" "-b '/var/lib/libvirt/images/ceph-base.qcow2'"
 # Our own persistent NoCloud seed ISO (cidata), attached as a cdrom.

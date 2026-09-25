@@ -99,6 +99,20 @@ esac
 #   usable = raw_per_osd * osd_count / replica  ->  raw_per_osd = usable*replica/osd_count
 : "${CEPH_OSD_DISK_GB:=$(( CEPH_POOL_USABLE_GB * CEPH_POOL_REPLICA * 118 / (CEPH_OSD_COUNT * 100) ))}"
 
+# --- OSD backing storage ------------------------------------------------------
+# Each OSD gets its OWN EBS volume attached to the EC2 instance and passed to the
+# ceph VM as a RAW block device (no qcow2, no shared filesystem) -- so the OSDs
+# don't contend with the host OS + OpenShift node images on one volume, and
+# BlueStore owns a real block device. Each gp3 volume has its own IOPS/throughput
+# budget. Set CEPH_OSD_ATTACH_EBS=false to instead use whatever spare whole disks
+# the instance already has (e.g. local NVMe on an m8id.* instance -- fastest, and
+# free/ephemeral, ideal for a disposable lab).
+: "${CEPH_OSD_ATTACH_EBS:=true}"
+: "${CEPH_OSD_VOLUME_TYPE:=gp3}"           # gp3 (default) | io2 | io1 | gp2 ...
+: "${CEPH_OSD_VOLUME_IOPS:=3000}"          # gp3 baseline 3000 (free) up to 16000; io2 up to 256000
+: "${CEPH_OSD_VOLUME_THROUGHPUT:=125}"     # gp3 only: MB/s, baseline 125 (free) up to 1000
+: "${ROOT_VOLUME_TYPE:=gp3}"               # EC2 host root volume type
+
 # Ceph node topology (a single VM on the same libvirt network as the cluster,
 # reachable only from the EC2 host). Not part of compute_nodes/compute_spares:
 # it is NOT an OpenShift node and never gets a BMH or takes part in the install.
@@ -109,15 +123,10 @@ CEPH_NODE_NAME="${CLUSTER_NAME}-ceph-0"
 CEPH_IP="${NET_CIDR%.*}.10"
 CEPH_MAC="52:54:00:6a:03:00"
 
-# EC2 root volume. With ODF enabled, add the ceph OSDs' raw footprint on top of
-# the base so the host disk can actually hold a full 200 GB pool (the qcow2 OSD
-# files are sparse, so this is headroom, not up-front usage).
-if [[ "${ODF_ENABLED}" == "true" ]]; then
-  _ec2_vol_default=$(( 1000 + CEPH_OSD_COUNT * CEPH_OSD_DISK_GB ))
-else
-  _ec2_vol_default=1000
-fi
-: "${EC2_VOLUME_SIZE_GB:=${_ec2_vol_default}}"
+# EC2 root/OS volume. OSDs now live on their OWN dedicated volumes (see above),
+# so the root only holds the host OS + the OpenShift node qcow2 images + agent
+# ISO/RHCOS + the ceph VM's small OS disk -- no need to size it for the pool.
+: "${EC2_VOLUME_SIZE_GB:=1000}"
 
 # Derived paths
 LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
