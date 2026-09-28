@@ -89,6 +89,14 @@ esac
 : "${CEPH_POOL_REPLICA:=3}"                # replicated pool size; usable = raw / replica
 : "${CEPH_POOL_USABLE_GB:=200}"            # target usable capacity of the RBD data pool
 : "${CEPH_RBD_POOL:=ocs-storagepool}"      # RBD data pool ODF external consumes
+# CephFS (filesystem) StorageClass. ON by default: odf_ceph_bootstrap creates a
+# CephFS + MDS on the external Ceph and the exporter advertises it, so ODF also
+# creates the 'ocs-external-storagecluster-cephfs' StorageClass (RWX-capable)
+# alongside the RBD (block/RWO) one. Set CEPH_FS_ENABLED=false for RBD-only. The
+# CephFS data pool shares the same OSDs as the RBD pool, so both draw from
+# CEPH_POOL_USABLE_GB -- raise CEPH_OSD_DISK_GB if you'll lean on both.
+: "${CEPH_FS_ENABLED:=true}"
+: "${CEPH_FS_NAME:=ocs-storagefs}"         # CephFS volume name (=> its data/meta pools)
 # External-details exporter (rook's create-external-cluster-resources.py). Run
 # INSIDE cephadm shell (has ceph + rados/rbd bindings). ITERATE: pin/override if
 # the upstream layout changes.

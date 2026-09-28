@@ -146,6 +146,21 @@ materializes as the `rook-ceph-*` Secrets/ConfigMaps and then creates an
 external-mode `StorageCluster` (`ocs-external-storagecluster`). ODF then creates
 the `ocs-external-storagecluster-ceph-rbd` StorageClass automatically.
 
+#### CephFS (filesystem / RWX) StorageClass
+
+By default the lab provisions **both** the RBD (block / RWO) StorageClass and a
+CephFS (filesystem / RWX) one. `create` makes a CephFS (`CEPH_FS_NAME`, default
+`ocs-storagefs`) plus an MDS on the external Ceph, the exporter advertises it
+(`--cephfs-filesystem-name`), and ODF creates
+`ocs-external-storagecluster-cephfs` — a `ReadWriteMany`-capable StorageClass.
+Use it with `accessModes: [ReadWriteMany]` and
+`storageClassName: ocs-external-storagecluster-cephfs`. Set
+`CEPH_FS_ENABLED=false` for RBD-only.
+
+The CephFS data pool shares the same OSDs (and replica policy) as the RBD pool,
+so both draw from the ~`CEPH_POOL_USABLE_GB` of usable capacity — raise
+`CEPH_OSD_DISK_GB` if you intend to lean on both.
+
 `destroy` removes the Ceph VM (and its OSD disks) with the instance, like every
 other domain.
 
