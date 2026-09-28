@@ -7,14 +7,17 @@
 #   odf_ceph_define_vm   - CentOS-Stream cloud VM on the rhwa net, +CEPH_OSD_COUNT
 #                          blank virtio disks (the OSD devices), cloud-init'd.
 #   odf_ceph_bootstrap   - cephadm --single-host-defaults; add one OSD per disk;
-#                          create the replicated RBD pool sized for 200 GB usable.
+#                          create the replicated RBD pool sized for 200 GB usable;
+#                          (CEPH_FS_ENABLED) also create a CephFS + MDS.
 #   odf_ceph_export      - run ceph-external-cluster-details-exporter.py to emit
-#                          the external-connection JSON (mons, keys, endpoints).
+#                          the external-connection JSON (mons, keys, endpoints);
+#                          advertises the CephFS too when CEPH_FS_ENABLED.
 #   odf_install_operator - OLM Subscription for the odf-operator.
 #   odf_import_external  - materialize the exporter JSON as the Secrets/ConfigMaps
 #                          rook expects (exactly what the OCP console importer does).
 #   odf_create_storagecluster - external-mode StorageCluster; ODF then creates
-#                          the ceph-rbd StorageClass automatically.
+#                          the ceph-rbd StorageClass automatically (and the
+#                          cephfs StorageClass when CephFS details were exported).
 #
 # The ceph VM is NOT an OpenShift node: no BMH, no fencing, not in compute_nodes.
 # It is reachable only from the EC2 host, so every command hops ssh_host -> VM.
@@ -231,6 +234,30 @@ odf_ceph_bootstrap() {
   _ceph_wait_ssh
   # PGs for a small single-pool lab; the autoscaler tunes from here.
   local pgnum=64
+  # Optional CephFS block, spliced into the remote script below. Built here (not
+  # a remote `if`) so nothing CephFS-related is shipped when the toggle is off.
+  # `fs volume create` makes the <fs> metadata+data pools and deploys an MDS via
+  # the orchestrator; --placement='1' keeps it to a single daemon on this one
+  # host. We resolve the data pool name (it differs across ceph versions) and
+  # apply the same replica/min_size policy as the RBD pool, then wait for the MDS
+  # to go active so the exporter (which needs a live fs) won't fail.
+  local fs_block="" fs_enabled="${CEPH_FS_ENABLED:-true}" fs_name="${CEPH_FS_NAME:-ocs-storagefs}"
+  if [[ "$fs_enabled" == "true" ]]; then
+    fs_block="$(cat <<FSB
+echo "--- creating CephFS ${fs_name} ---"
+CEPH ceph fs volume create '${fs_name}' --placement='1' 2>&1 || true
+fsdata=\$(CEPH ceph fs ls -f json 2>/dev/null | jq -r '.[] | select(.name=="${fs_name}") | .data_pools[0]' 2>/dev/null || echo '')
+if [[ -n "\${fsdata}" && "\${fsdata}" != "null" ]]; then
+  CEPH ceph osd pool set "\${fsdata}" size ${CEPH_POOL_REPLICA}
+  CEPH ceph osd pool set "\${fsdata}" min_size 2
+else
+  echo "WARN: could not resolve CephFS data pool for '${fs_name}'; leaving pool defaults" >&2
+fi
+for i in \$(seq 1 24); do CEPH ceph fs status '${fs_name}' 2>/dev/null | grep -q active && break; sleep 5; done
+CEPH ceph fs status '${fs_name}' 2>/dev/null | grep -q active || echo "WARN: CephFS '${fs_name}' has no active MDS yet; the exporter may fail." >&2
+FSB
+)"
+  fi
   log "Bootstrapping single-host Ceph on ${CEPH_IP} and adding ${CEPH_OSD_COUNT} OSDs"
   _ssh_ceph "sudo bash -s" <<EOS
 set -euo pipefail
@@ -315,6 +342,7 @@ CEPH ceph osd pool set '${CEPH_RBD_POOL}' size ${CEPH_POOL_REPLICA}
 CEPH ceph osd pool set '${CEPH_RBD_POOL}' min_size 2
 CEPH ceph osd pool application enable '${CEPH_RBD_POOL}' rbd 2>&1 || true
 CEPH rbd pool init '${CEPH_RBD_POOL}'
+${fs_block}
 # Enable ceph-mgr's prometheus module (port 9283) -- the external-details
 # exporter requires it to record ODF's monitoring endpoint. Verify it registers.
 CEPH ceph mgr module enable prometheus
@@ -346,14 +374,18 @@ odf_ceph_export() {
   [[ "${CEPH_ENABLED}" == "true" ]] || return 0
   local out="${CLUSTER_DIR}/ceph-external.json"
   local err; err="$(mktemp "${TMPDIR:-/tmp}/rhwa-lab.XXXXXX")"
-  log "Exporting external Ceph connection details (rbd pool ${CEPH_RBD_POOL})"
+  # Advertise CephFS to the exporter only when enabled; it then mints the CephFS
+  # CSI users + pools in the JSON and ODF creates the cephfs StorageClass.
+  local fsflag="" fs_enabled="${CEPH_FS_ENABLED:-true}" fs_name="${CEPH_FS_NAME:-ocs-storagefs}"
+  [[ "$fs_enabled" == "true" ]] && fsflag="--cephfs-filesystem-name '${fs_name}'"
+  log "Exporting external Ceph connection details (rbd pool ${CEPH_RBD_POOL}${fsflag:+, cephfs ${fs_name}})"
   _ssh_ceph "sudo bash -s" >"${out}" 2>"${err}" <<EOS
 set -euo pipefail
 CEPHADM="\$(command -v cephadm)"
 curl -fsSL '${CEPH_EXPORTER_URL}' -o /tmp/exporter.py
 [[ -s /tmp/exporter.py ]] || { echo "ERROR: failed to download the exporter from ${CEPH_EXPORTER_URL}" >&2; exit 1; }
 "\$CEPHADM" shell -- python3 - \
-  --rbd-data-pool-name '${CEPH_RBD_POOL}' \
+  --rbd-data-pool-name '${CEPH_RBD_POOL}' ${fsflag} \
   --namespace '${ODF_NAMESPACE}' \
   --monitoring-endpoint '${CEPH_IP}' \
   --monitoring-endpoint-port 9283 \
@@ -500,7 +532,8 @@ EOF
 
 # Create the external-mode StorageCluster. With the imported details present,
 # ocs-operator connects rook to the external Ceph and creates the ceph-rbd
-# StorageClass (ocs-external-storagecluster-ceph-rbd) automatically.
+# StorageClass (ocs-external-storagecluster-ceph-rbd) automatically -- plus
+# ocs-external-storagecluster-cephfs (RWX) when the export advertised a CephFS.
 odf_create_storagecluster() {
   log "Creating external-mode StorageCluster in ${ODF_NAMESPACE}"
   oc apply -f - <<EOF

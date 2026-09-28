@@ -10,7 +10,7 @@ log(){ :; }; ok(){ :; }; warn(){ :; }; die(){ echo "DIE: $*"; exit 1; }
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")"
 export CEPH_ENABLED=true CEPH_RBD_POOL=ocs-storagepool ODF_NAMESPACE=openshift-storage \
        CEPH_IP=192.168.126.10 CEPH_EXPORTER_URL=https://example.test/exporter.py \
-       CLUSTER_DIR="$tmp"
+       CEPH_FS_ENABLED=false CLUSTER_DIR="$tmp"
 source "${DIR}/../lib/odf.sh"
 CAP="$(mktemp "${TMPDIR:-/tmp}/rhwa-test.XXXXXX")"
 # Capture the remote script (stdin) to CAP; emit a valid JSON array on stdout so
@@ -24,6 +24,8 @@ assert_contains     "$CAP" "--rbd-data-pool-name 'ocs-storagepool'"
 assert_contains     "$CAP" "--monitoring-endpoint '192.168.126.10'"
 assert_contains     "$CAP" "< /tmp/exporter.py"     # piped, not mounted
 assert_not_contains "$CAP" "--mount"
+# RBD-only here (CEPH_FS_ENABLED=false): the exporter isn't told to advertise a fs.
+assert_not_contains "$CAP" "--cephfs-filesystem-name"
 # The captured JSON array landed in the state file.
 jq -e 'length == 1' "${tmp}/ceph-external.json" >/dev/null || { echo "FAIL: JSON not captured"; exit 1; }
 echo "PASS"

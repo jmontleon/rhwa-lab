@@ -9,7 +9,7 @@ log(){ :; }; ok(){ :; }; warn(){ :; }
 export CEPH_ENABLED=true CEPH_RELEASE=squid CEPH_IMAGE=quay.io/ceph/ceph:v19 \
        CEPH_IP=192.168.126.10 CEPH_HOST=ceph-0 CEPH_SSH_USER=cloud-user \
        CEPH_OSD_COUNT=3 CEPH_POOL_REPLICA=3 CEPH_POOL_USABLE_GB=200 \
-       CEPH_RBD_POOL=ocs-storagepool
+       CEPH_RBD_POOL=ocs-storagepool CEPH_FS_ENABLED=false
 source "${DIR}/../lib/odf.sh"
 # Don't touch real state; capture what would run on the ceph VM.
 state_get(){ echo ""; }   # not yet bootstrapped
@@ -47,6 +47,8 @@ assert_contains "$OUT" "osd pool set 'ocs-storagepool' size 3"
 assert_contains "$OUT" "osd pool set 'ocs-storagepool' min_size 2"
 assert_contains "$OUT" "osd pool application enable 'ocs-storagepool' rbd"
 assert_contains "$OUT" "rbd pool init 'ocs-storagepool'"
+# RBD-only here (CEPH_FS_ENABLED=false): no filesystem/MDS commands are emitted.
+assert_not_contains "$OUT" "fs volume create"
 # ODF external monitoring endpoint needs the mgr prometheus module.
 assert_contains "$OUT" "mgr module enable prometheus"
 # CRITICAL: cephadm shell stdin redirected from /dev/null, else it swallows this
